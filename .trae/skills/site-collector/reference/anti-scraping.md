@@ -104,3 +104,104 @@ if not resp.encoding or resp.encoding.lower() == 'iso-8859-1':
     resp.encoding = resp.apparent_encoding  # chardet 检测
 ```
 务必在 `_get_html` 中处理。
+
+## 缓存实现(强制,每个采集功能必须带缓存)
+**目的**:避免每次访问都请求源站,降低源站与服务器压力。
+**默认时长**:1-2 小时,`.env` 中 `CACHE_TTL_HOURS` 自定义(默认 2)。
+
+### settings.py 配置
+```python
+# .env 中配置: CACHE_TTL_HOURS=2
+CACHE_TTL_HOURS = float(os.getenv('CACHE_TTL_HOURS', '2'))
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
+        'LOCATION': os.path.join(BASE_DIR, 'cache'),
+    },
+}
+```
+
+### 爬虫缓存骨架(照此结构)
+```python
+import os
+import time
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# 缓存时长(秒):从 .env 的 CACHE_TTL_HOURS 读取,默认 2 小时
+CACHE_TTL = float(os.getenv('CACHE_TTL_HOURS', '2')) * 3600
+
+
+class _CacheAdapter:
+    """统一缓存入口:优先 django cache(视图请求环境),独立脚本/未配置 settings 时退化为内存缓存"""
+
+    def __init__(self):
+        self._backend = None  # None=未初始化
+
+    def _get_backend(self):
+        if self._backend is None:
+            try:
+                from django.core.cache import cache
+                cache.get('__probe__')  # 触发 settings 检查
+                self._backend = cache
+            except Exception:
+                self._backend = 'mem'
+        return self._backend
+
+    def get(self, key):
+        backend = self._get_backend()
+        if backend == 'mem':
+            item = _CacheAdapter._mem_store.get(key)
+            if item and item[1] > time.time():
+                return item[0]
+            return None
+        return backend.get(key)
+
+    def set(self, key, value, timeout):
+        backend = self._get_backend()
+        if backend == 'mem':
+            _CacheAdapter._mem_store[key] = (value, time.time() + timeout)
+        else:
+            backend.set(key, value, timeout)
+
+    _mem_store = {}
+
+
+cache = _CacheAdapter()
+
+
+class MovieXxxSpider:
+    ...
+    def _cached(self, key, fetch_func):
+        """带缓存的采集:命中缓存直接返回,未命中抓取解析后写入缓存"""
+        data = cache.get(key)
+        if data is not None:
+            return data
+        data = fetch_func()
+        cache.set(key, data, CACHE_TTL)
+        return data
+
+    def fetch_movie_list(self, mtype, page):
+        # 缓存键规范:<站点缩写>_<功能>_<参数>
+        return self._cached(f'movie_{mtype}_{page}',
+                            lambda: self._do_fetch_movie_list(mtype, page))
+```
+
+### 缓存键规范
+- 格式:`<站点缩写>_<功能>_<参数>`,如 `i4_home`、`i4_news_list_1_2`、`i4_news_detail_56195`
+- 每个 `fetch_xxx` 方法必须用 `_cached` 包一层,不得裸请求源站
+- 参数含空格/逗号等特殊字符时,先 `hashlib.md5(param.encode('utf-8')).hexdigest()` 再拼 key,如 `i4_firmware_{md5(model)}`(直接拼原字符会触发 FileBasedCache 的 key 校验告警)
+
+### 缓存目录结构(FileBasedCache)
+- 缓存存于 `settings.CACHES['default']['LOCATION']` 指定目录,本项目为项目根 `cache/`
+- 每个 key 对应一个 `<key 的 md5>.djcache` 文件,无数据库/Redis 依赖
+- 缓存文件在 TTL 到期后自动失效,下次访问重新抓取
+
+### 手动清缓存(强制,排查必读)
+修改爬虫解析逻辑或缓存时长后,已缓存的旧数据不会自动失效,**必须清空 `cache/` 目录**才能看到新逻辑生效:
+```bash
+python -c "import shutil; shutil.rmtree('cache')"
+```
+注意:Trae CN 环境下 PowerShell 的 `Remove-Item` 会被安全包装器拦截,请用上面的 Python 方式删除。

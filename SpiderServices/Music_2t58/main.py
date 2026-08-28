@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import hashlib
 import urllib.parse
 
@@ -10,6 +11,52 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 
 load_dotenv()
+
+# ============ 缓存配置 ============
+# 全局默认缓存时长(小时):由 .env 的 CACHE_TTL_HOURS 控制,默认 2 小时(1-3 小时均可)。
+# 可按页面类型单独覆盖,如 CACHE_TTL_HOURS_CHART=1 仅将榜单页改为 1 小时,详见 _ttl_for。
+CACHE_TTL_HOURS = float(os.getenv('CACHE_TTL_HOURS', '2'))
+# 播放直链短缓存时长(分钟):CDN 直链有时效,单独短缓存避免过期播放失败,
+# 由 .env 的 CACHE_TTL_PLAY_MINUTES 控制,默认 30 分钟。
+CACHE_TTL_PLAY_MINUTES = float(os.getenv('CACHE_TTL_PLAY_MINUTES', '30'))
+
+
+class _CacheAdapter:
+    """统一缓存入口:优先 django cache(视图请求环境),独立脚本/未配置 settings 时退化为内存缓存"""
+
+    def __init__(self):
+        self._backend = None  # None=未初始化
+
+    def _get_backend(self):
+        if self._backend is None:
+            try:
+                from django.core.cache import cache
+                cache.get('__probe__')  # 触发 settings 检查
+                self._backend = cache
+            except Exception:
+                self._backend = 'mem'
+        return self._backend
+
+    def get(self, key):
+        backend = self._get_backend()
+        if backend == 'mem':
+            item = _CacheAdapter._mem_store.get(key)
+            if item and item[1] > time.time():
+                return item[0]
+            return None
+        return backend.get(key)
+
+    def set(self, key, value, timeout):
+        backend = self._get_backend()
+        if backend == 'mem':
+            _CacheAdapter._mem_store[key] = (value, time.time() + timeout)
+        else:
+            backend.set(key, value, timeout)
+
+    _mem_store = {}
+
+
+cache = _CacheAdapter()
 
 
 class Music2t58Spider:
@@ -45,6 +92,46 @@ class Music2t58Spider:
         phpsessid = os.getenv('MUSIC_2T58_PHPSESSID', '')
         if phpsessid:
             self.session.cookies.set('PHPSESSID', phpsessid)
+
+    # ============ 缓存辅助方法 ============
+    # 每个页面类型对应一个 .env 覆盖项,不配置时用全局 CACHE_TTL_HOURS
+    CACHE_TYPE_TTL_ENV = {
+        'home': 'CACHE_TTL_HOURS_HOME',
+        'singer': 'CACHE_TTL_HOURS_SINGER',
+        'song': 'CACHE_TTL_HOURS_SONG',
+        'search': 'CACHE_TTL_HOURS_SEARCH',
+        'chart': 'CACHE_TTL_HOURS_CHART',
+        'singer_list': 'CACHE_TTL_HOURS_SINGER_LIST',
+        'playtype': 'CACHE_TTL_HOURS_PLAYTYPE',
+        'playlist': 'CACHE_TTL_HOURS_PLAYLIST',
+        'mvlist': 'CACHE_TTL_HOURS_MVLIST',
+    }
+
+    def _ttl_for(self, cache_type):
+        """按页面类型取缓存时长(秒):优先 .env 中 CACHE_TTL_HOURS_<类型> 覆盖,缺省用全局 CACHE_TTL_HOURS"""
+        env_name = self.CACHE_TYPE_TTL_ENV.get(cache_type, '')
+        hours = float(os.getenv(env_name)) if env_name and os.getenv(env_name) else CACHE_TTL_HOURS
+        return int(hours * 3600)
+
+    def _play_ttl(self):
+        """播放直链短缓存时长(秒):CDN 直链有时效,单独短缓存防止过期播放失败"""
+        return int(CACHE_TTL_PLAY_MINUTES * 60)
+
+    def _cache_key(self, *parts):
+        """构造缓存键:<站点缩写>_<功能>_<参数>;参数含特殊字符(空格/斜杠等)时取 md5,避免 FileBasedCache 键名告警"""
+        joined = '_'.join(str(p) for p in parts)
+        if any(c in joined for c in ' /?:#&=@'):
+            joined = f'{parts[0]}_{hashlib.md5(joined.encode("utf-8")).hexdigest()}'
+        return f'2t58_{joined}'
+
+    def _cached(self, key, fetch_func, timeout):
+        """带缓存的抓取:命中缓存直接返回,未命中执行抓取后写入缓存"""
+        data = cache.get(key)
+        if data is not None:
+            return data
+        data = fetch_func()
+        cache.set(key, data, timeout)
+        return data
 
     def _get_html(self, url):
         """获取页面 HTML，自动处理人机验证
@@ -87,10 +174,17 @@ class Music2t58Spider:
         return resp.text
 
     def fetch_home(self):
-        """抓取首页三大板块：热门歌手 / 歌曲飙升榜 / 流行趋势榜
+        """抓取首页三大板块：热门歌手 / 歌曲飙升榜 / 流行趋势榜（带缓存）
 
         失败时抛出异常，由调用方捕获降级处理。
         """
+        return self._cached(
+            self._cache_key('home'),
+            self._do_fetch_home,
+            self._ttl_for('home'),
+        )
+
+    def _do_fetch_home(self):
         tree = etree.HTML(self._get_html(self.HOME_URL))
 
         return {
@@ -143,10 +237,17 @@ class Music2t58Spider:
         return result
 
     def fetch_singer(self, sid, page=1):
-        """抓取歌手详情页：歌手信息 / 歌曲列表 / 分页
+        """抓取歌手详情页：歌手信息 / 歌曲列表 / 分页（带缓存）
 
         sid 为歌手id（如 d2t3eA），page 为歌曲列表页码。
         """
+        return self._cached(
+            self._cache_key('singer', sid, page),
+            lambda: self._do_fetch_singer(sid, page),
+            self._ttl_for('singer'),
+        )
+
+    def _do_fetch_singer(self, sid, page):
         url = f'{self.HOME_URL}singer/{sid}/{page}.html'
         tree = etree.HTML(self._get_html(url))
 
@@ -208,10 +309,27 @@ class Music2t58Spider:
         return {'links': links}
 
     def fetch_song(self, sid):
-        """抓取歌曲详情页：歌曲信息 / 播放链接 / 歌词 / 每日推荐
+        """抓取歌曲详情页：歌曲信息 / 播放链接 / 歌词 / 每日推荐（带缓存）
 
         sid 为歌曲id（如 d2ttY2R2bg）。
+        歌曲信息与歌词走常规长缓存；播放直链单独短缓存（默认 30 分钟），
+        避免 CDN 直链过期导致播放失败。
         """
+        # 长缓存：歌曲信息 / 歌词 / 每日推荐
+        data = self._cached(
+            self._cache_key('song', sid),
+            lambda: self._do_fetch_song(sid),
+            self._ttl_for('song'),
+        )
+        # 短缓存：播放直链（长缓存未命中时 _do_fetch_song 已顺手写入）
+        data['play_url'] = self._cached(
+            self._cache_key('song_play', sid),
+            lambda: self._fetch_play_info(sid, f'{self.HOME_URL}song/{sid}.html')['play_url'],
+            self._play_ttl(),
+        )
+        return data
+
+    def _do_fetch_song(self, sid):
         url = f'{self.HOME_URL}song/{sid}.html'
         tree = etree.HTML(self._get_html(url))
 
@@ -224,9 +342,11 @@ class Music2t58Spider:
         if not song_info['cover']:
             song_info['cover'] = play_info['cover']
 
+        # 顺手把本次抓取的播放直链写入短缓存，避免被 fetch_song 重复请求 play.php
+        cache.set(self._cache_key('song_play', sid), play_info['play_url'], self._play_ttl())
+
         return {
             'song': song_info,
-            'play_url': play_info['play_url'],
             'lyrics': lyrics,
             'daily_recommend': daily,
         }
@@ -236,6 +356,7 @@ class Music2t58Spider:
 
         下载时重新请求 play.php 获取直链（页面加载时解密的直链可能已过期），
         由视图层后端代理该直链，避免源站防盗链与链接时效问题。
+        注意：下载必须返回最新直链，本方法不缓存。
         """
         url = f'{self.HOME_URL}song/{sid}.html'
         tree = etree.HTML(self._get_html(url))
@@ -249,11 +370,18 @@ class Music2t58Spider:
         }
 
     def fetch_search(self, keyword, page=1):
-        """抓取搜索结果页：结果列表 / 分页
+        """抓取搜索结果页：结果列表 / 分页（带缓存）
 
         keyword 为搜索关键词，page 为页码。
         URL 规则：第1页 /so/{kw}.html，第N页 /so/{kw}/{N}.html
         """
+        return self._cached(
+            self._cache_key('search', keyword, page),
+            lambda: self._do_fetch_search(keyword, page),
+            self._ttl_for('search'),
+        )
+
+    def _do_fetch_search(self, keyword, page):
         encoded = urllib.parse.quote(keyword)
         if page > 1:
             url = f'{self.HOME_URL}so/{encoded}/{page}.html'
@@ -268,11 +396,18 @@ class Music2t58Spider:
         }
 
     def fetch_chart(self, chart, page=1):
-        """抓取榜单页：热门榜单 / 结果列表 / 分页
+        """抓取榜单页：热门榜单 / 结果列表 / 分页（带缓存）
 
         chart 为榜单标识（如 new、djwuqu），page 为页码。
         URL 规则：第1页 /list/{chart}.html，第N页 /list/{chart}/{N}.html
         """
+        return self._cached(
+            self._cache_key('chart', chart, page),
+            lambda: self._do_fetch_chart(chart, page),
+            self._ttl_for('chart'),
+        )
+
+    def _do_fetch_chart(self, chart, page):
         if page > 1:
             url = f'{self.HOME_URL}list/{chart}/{page}.html'
         else:
@@ -316,11 +451,18 @@ class Music2t58Spider:
         return result
 
     def fetch_singer_list(self, area='index', gender='index', style='index', letter='index', page=1):
-        """抓取歌手列表页：分类筛选 / 歌手列表 / 分页
+        """抓取歌手列表页：分类筛选 / 歌手列表 / 分页（带缓存）
 
         URL 规则：/singerlist/{area}/{gender}/{style}/{letter}/{page}.html
         area/gender/style/letter 为分类标识，index 表示全部。
         """
+        return self._cached(
+            self._cache_key('singer_list', area, gender, style, letter, page),
+            lambda: self._do_fetch_singer_list(area, gender, style, letter, page),
+            self._ttl_for('singer_list'),
+        )
+
+    def _do_fetch_singer_list(self, area, gender, style, letter, page):
         base = f'{self.HOME_URL}singerlist/{area}/{gender}/{style}/{letter}'
         url = f'{base}/{page}.html' if page > 1 else f'{base}.html'
         tree = etree.HTML(self._get_html(url))
@@ -381,10 +523,17 @@ class Music2t58Spider:
         return result
 
     def fetch_playtype_list(self, playtype='index', page=1):
-        """抓取歌单列表页：分类筛选 / 歌单列表 / 分页
+        """抓取歌单列表页：分类筛选 / 歌单列表 / 分页（带缓存）
 
         URL 规则：/playtype/{playtype}/{page}.html，playtype 为分类标识，index 表示全部。
         """
+        return self._cached(
+            self._cache_key('playtype', playtype, page),
+            lambda: self._do_fetch_playtype_list(playtype, page),
+            self._ttl_for('playtype'),
+        )
+
+    def _do_fetch_playtype_list(self, playtype, page):
         if page > 1:
             url = f'{self.HOME_URL}playtype/{playtype}/{page}.html'
         else:
@@ -455,11 +604,18 @@ class Music2t58Spider:
         return result
 
     def fetch_playlist(self, sid, page=1):
-        """抓取歌单详情页：歌单信息 / 歌曲列表 / 分页
+        """抓取歌单详情页：歌单信息 / 歌曲列表 / 分页（带缓存）
 
         URL 规则：/playlist/{sid}/{page}.html，第1页 /playlist/{sid}.html。
         歌曲列表结构与搜索结果一致，复用 _parse_search_results。
         """
+        return self._cached(
+            self._cache_key('playlist', sid, page),
+            lambda: self._do_fetch_playlist(sid, page),
+            self._ttl_for('playlist'),
+        )
+
+    def _do_fetch_playlist(self, sid, page):
         if page > 1:
             url = f'{self.HOME_URL}playlist/{sid}/{page}.html'
         else:
@@ -494,10 +650,17 @@ class Music2t58Spider:
         }
 
     def fetch_mvlist(self, mvtype='index', page=1):
-        """抓取MV列表页：分类筛选 / MV列表 / 分页
+        """抓取MV列表页：分类筛选 / MV列表 / 分页（带缓存）
 
         URL 规则：/mvlist/{mvtype}/{page}.html，mvtype 为分类标识，index 表示全部。
         """
+        return self._cached(
+            self._cache_key('mvlist', mvtype, page),
+            lambda: self._do_fetch_mvlist(mvtype, page),
+            self._ttl_for('mvlist'),
+        )
+
+    def _do_fetch_mvlist(self, mvtype, page):
         if page > 1:
             url = f'{self.HOME_URL}mvlist/{mvtype}/{page}.html'
         else:
@@ -577,10 +740,19 @@ class Music2t58Spider:
         return ''
 
     def fetch_video(self, sid):
-        """抓取MV详情页：MV标题 / 歌手信息 / 专辑 / 下载 / 每日推荐 / DPlayer配置
+        """抓取MV详情页：MV标题 / 歌手信息 / 专辑 / 下载 / 每日推荐 / DPlayer配置（带缓存）
 
         sid 为MVid（如 d3Ntd2tkY3Nz）。
+        详情内含 CDN mp4 直链（qualities），直链有时效，故整体按播放直链
+        短缓存时长缓存（默认 30 分钟），防止视频链接过期播放失败。
         """
+        return self._cached(
+            self._cache_key('video', sid),
+            lambda: self._do_fetch_video(sid),
+            self._play_ttl(),
+        )
+
+    def _do_fetch_video(self, sid):
         url = f'{self.HOME_URL}video/{sid}.html'
         html = self._get_html(url)
         tree = etree.HTML(html)

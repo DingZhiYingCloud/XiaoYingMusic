@@ -140,9 +140,7 @@ urlpatterns = [
 {% include 'common_html/footer.html' %}
 {% endblock %}
 ```
-- **保留原网页视觉呈现**:模板HTML结构尽量还原原站DOM层级与类名,复用已克隆的CSS类(`.main`/`.layui-container`/`.play_list`/`.page` 等),确保渲染效果与原站一致
-- 原站特有的样式若本地CSS未覆盖,按行业标准在 base.css 补充实现(不自创冗余类)
-- 交互功能(如播放/筛选/轮播)需手动实现JS,保持与原站功能一致
+- 复用现有 CSS 类名(`.main`/`.layui-container`/`.play_list`/`.page` 等),不自创新类
 - 末尾 `{% include 'common_html/footer.html' %}`
 - 详情页模板参考 `singer.html` / `playlist.html` 结构
 

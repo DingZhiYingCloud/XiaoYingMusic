@@ -119,3 +119,16 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # 媒体文件配置
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+
+
+# ============ 缓存配置（爬虫数据缓存，减轻源站压力） ============
+# 说明：爬虫抓取的页面数据缓存到本地文件（零依赖），TTL 由 .env 的
+# CACHE_TTL_HOURS 动态控制（默认 2 小时，可设 1-3 或任意值）。
+# 清缓存：python -c "import shutil; shutil.rmtree('cache')"
+CACHE_TTL_HOURS = float(os.getenv('CACHE_TTL_HOURS', '2'))
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
+        'LOCATION': os.path.join(BASE_DIR, 'cache'),
+    },
+}

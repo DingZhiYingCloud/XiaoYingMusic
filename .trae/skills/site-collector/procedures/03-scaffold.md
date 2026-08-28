@@ -47,28 +47,20 @@ SpiderServices/<站点名>/main.py
 - `common_html/footer.html`:底部移动端导航(用 Font Awesome 图标)
 - `common_html/friend_links.html`:友情链接(可选)
 
-### 5. 完整克隆目标站视觉与资源
-按 [01-analyze.md](01-analyze.md) 第6步的克隆分类结论执行,目标是保留原网页视觉呈现与功能完整性:
+### 5. 处理目标站 CSS/JS 资源
+根据分析结论(下载 or 模仿),与用户确认后执行:
 
-**5.1 下载可自动克隆的资源**
-- 图片/logo/背景图 → `Web/static/images/`(清理品牌词/外链,替换为自己的)
-- 图标字体 → `Web/static/fonts/`
-- 外部 CSS 文件 → `Web/static/css/`
-- 外部 JS 文件 → `Web/static/js/`
-- 在 template.html 中引入下载的资源
-- ⚠️ 清理资源内目标站的域名/品牌词/统计代码/外链,替换为自己的
+**方案A:下载目标站资源**
+- 下载目标站的 CSS 文件到 `Web/static/css/`
+- 下载 JS 文件到 `Web/static/js/`
+- 下载图片(logo等)到 `Web/static/images/`
+- 在 template.html 中引入
+- 注意:清理资源里的目标站品牌词/外链,替换为自己的
 
-**5.2 手动重写无法自动克隆的部分**
-- **HTML结构**:按原站DOM层级重写 template.html 与公共片段,保持关键容器与类名
-- **CSS样式**:在 base.css 中等价实现原站样式(布局/颜色/字体/响应式),保持类名一致
-- **JS功能**:重写交互逻辑(导航/搜索/播放等),功能与原站一致
-
-**5.3 手动代码质量标准(必须满足)**
-- 符合行业标准:语义化HTML、模块化CSS、无侵入JS
-- 可维护性:清晰注释、合理命名、DRY 不重复
-- 兼容性:主流浏览器兼容、响应式适配
-- 视觉一致:布局/配色/字体/间距与原站一致
-- 功能完整:原站的交互行为都要实现,不遗漏
+**方案B:模仿目标站样式自写**
+- 分析目标站关键样式类(header/.logo/.nav/.play_list/.page 等)
+- 在 `Web/static/css/base.css` 中实现等价样式
+- 保持类名一致,便于后续模板复用
 
 ### 6. 配置 .env
 在 `.env` 添加反爬凭证占位:

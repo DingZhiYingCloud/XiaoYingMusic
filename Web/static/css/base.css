@@ -910,7 +910,7 @@ html body { padding-bottom:66px; }
 .bz-chart-ol .bz-chart-act .bz-act:hover { color:#1677ff; }
 .bz-chart-ol .bz-chart-act .bz-act.liked { color:#ff3b3b; }
 /* —— 歌曲详情页操作按钮（加入播放列表 / 喜欢 / 下载） —— */
-.bz-pp-acts { display:flex; justify-content:center; gap:12px; margin-top:18px; }
+.bz-pp-acts { display:flex; justify-content:center; gap:12px; margin-top:18px; flex-wrap:wrap; }
 .bz-pp-btn {
     display:inline-flex; align-items:center; gap:6px; padding:8px 22px; border-radius:22px;
     font-size:14px; color:#fff; background:linear-gradient(135deg,#69b1ff,#1677ff);

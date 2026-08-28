@@ -30,8 +30,9 @@
                     <div class="lrc_nofound" id="lrc_nofound" style="display:none;">暂无歌词，静静欣赏旋律吧</div>
                 </div>
             </div>
-            <!-- 操作按钮：加入播放列表 / 喜欢 / 下载（控制条在底部悬浮条） -->
+            <!-- 操作按钮：播放 / 加入播放列表 / 喜欢 / 下载（控制条在底部悬浮条） -->
             <div class="bz-pp-acts">
+                <a href="javascript:;" class="bz-pp-btn bz-play-ico" data-sid="{{ sid }}" data-title="{{ song.artists|join:'/' }} - {{ song.name }}"><i class="fa fa-play"></i> 播放</a>
                 <a href="javascript:;" class="bz-pp-btn bz-add" data-sid="{{ sid }}" data-title="{{ song.artists|join:'/' }} - {{ song.name }}"><i class="fa fa-plus"></i> 加入播放列表</a>
                 <a href="javascript:;" class="bz-pp-btn ghost bz-like" data-sid="{{ sid }}" data-title="{{ song.artists|join:'/' }} - {{ song.name }}"><i class="fa fa-heart-o"></i> 喜欢</a>
                 <a href="javascript:;" class="bz-pp-btn ghost" id="bz-btn-download"><i class="fa fa-download"></i> 下载</a>

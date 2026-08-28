@@ -26,6 +26,9 @@ logs/
 *.db
 *.sqlite3
 
+# 爬虫缓存目录（FileBasedCache 运行时生成，不入库）
+/cache/
+
 # 媒体文件:仅忽略 media/uploads/ 下的用户上传内容,允许提交 API/apis/uploads/ 代码目录
 /media/uploads/
 

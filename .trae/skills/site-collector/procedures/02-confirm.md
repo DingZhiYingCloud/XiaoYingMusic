@@ -13,7 +13,6 @@
 - **数据字段**:将提取的字段清单(如 title/link/pic/intro)
 - **URL规则**:分页规则 / 详情链接格式 / 分类参数结构
 - **反爬机制**:探测结论(无反爬 / 表单验证 / cookie鉴权)+ 需要的凭证
-- **克隆分类**:可下载资源清单(图片/字体/CSS/JS)+ 需手动重写部分(HTML结构/CSS样式/JS功能)
 
 ### 2. 实施方案(命名清单)
 按 [naming-conventions.md](../reference/naming-conventions.md) 列出全部命名:
@@ -39,7 +38,7 @@ URL路径:       /movie/<mtype>/<int:page>.html  /  /movie/<sid>.html
 
 ### 4. 需用户配合的事项
 - 反爬凭证(如需):告知用户去浏览器获取 PHPSESSID,配置到 .env
-- 克隆策略确认:哪些资源直接下载、哪些手动重写,以及手动重写的范围(HTML/CSS/JS)
+- CSS/JS 决策(模式A):是下载目标站资源还是模仿样式自写
 - 不确定的命名/字段:列出选项让用户选
 
 ## 确认方式

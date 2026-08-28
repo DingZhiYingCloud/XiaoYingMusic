@@ -15,7 +15,7 @@ description: "Analyze a target website and extend the Django project with conten
 ## 两种执行模式
 
 ### 模式A:框架搭建
-**触发条件**:用户刚创建 Django 项目,需要搭建采集框架(创建 SpiderServices/templates/static/media 目录,完整克隆目标站页面结构与资源,搭基础模板)。
+**触发条件**:用户刚创建 Django 项目,需要搭建采集框架(创建 SpiderServices/templates/static/media 目录,下载或模仿目标站 CSS/JS,搭基础模板)。
 **执行**:→ [procedures/03-scaffold.md](procedures/03-scaffold.md)
 
 ### 模式B:页面采集(核心)
@@ -44,8 +44,29 @@ description: "Analyze a target website and extend the Django project with conten
 - 数据结构约定(列表/详情/分页/筛选) → [reference/data-conventions.md](reference/data-conventions.md)
 - 通用反爬框架 → [reference/anti-scraping.md](reference/anti-scraping.md)
 
+## 缓存规范(强制,每个采集功能都必须实现)
+**目的**:避免每次访问都请求源站,降低源站与服务器压力。
+
+- **缓存对象**:所有 `fetch_xxx` 采集方法的返回结果
+- **默认时长**:1-2 小时(`.env` 中 `CACHE_TTL_HOURS` 自定义,默认 2)
+- **缓存键**:`<站点缩写>_<功能>_<参数>`,如 `i4_home`、`i4_news_list_1_2`、`i4_news_detail_56195`;参数含空格/逗号等特殊字符时取 md5 再拼,如 `i4_firmware_{md5(model)}`(直接拼原字符会触发缓存后端告警)
+- **缓存目录**:FileBasedCache 把每个 key 存为项目根 `cache/` 目录下的 `<md5>.djcache` 文件(无数据库/Redis,零依赖)
+- **手动清缓存**:修改爬虫解析或缓存逻辑后必须清空 `cache/` 目录才能生效,用 `python -c "import shutil; shutil.rmtree('cache')"`(Trae CN 环境下 PowerShell `Remove-Item` 会被安全包装器拦截,勿用)
+- **实现方式**:爬虫内 `_cached(key, fetch_func)` 统一封装(先查缓存,未命中抓取解析后写入)
+- **settings.py 必须配置**:
+  ```python
+  CACHE_TTL_HOURS = float(os.getenv('CACHE_TTL_HOURS', '2'))
+  CACHES = {
+      'default': {
+          'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
+          'LOCATION': os.path.join(BASE_DIR, 'cache'),
+      },
+  }
+  ```
+- **独立脚本兼容**:爬虫可在 Django 环境外运行,缓存后端需有内存兜底(参考 anti-scraping.md 的 `_CacheAdapter`)
+- 完整模板见 [reference/anti-scraping.md](reference/anti-scraping.md) 的"缓存实现"章节
+
 ## 关键原则
-- **克隆优先**:采集页面时,先尝试完整克隆原网页的所有元素、结构和资源(CSS/JS/图片/字体);无法通过自动方式克隆的部分(HTML结构/CSS样式/JS功能)手动编写实现,确保保留原网页的视觉呈现与功能完整性;手动代码符合行业标准、可维护、兼容
 - **最小改动**:仅修改与需求直接相关的代码,不重构无关代码
 - **复用优先**:分页解析 `_parse_pagination`、列表解析 `_parse_search_results` 等公共方法能复用就复用
 - **降级兜底**:视图必须 try/except,爬虫失败时返回同结构空数据,保证页面可访问
