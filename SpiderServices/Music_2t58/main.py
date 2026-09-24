@@ -134,8 +134,7 @@ class Music2t58Spider:
     # 不用标注每条域名的播放接口是加密的还是明文的 —— _play_url 会自动识别：
     # 拿回来是 http(s) 开头就按明文直链用，否则才当密文走 AES 解密。
     #
-    # 下面是没配 .env 时的兜底清单，也是从源站整理出来的已知域名（完整记录见
-    # 项目根目录 2t58音乐网的全部域名.txt）。
+    # 下面是没配 .env 时的兜底清单，也是从源站整理出来的已知域名。
     DOMAINS = [_normalize_base(d) for d in _env_list(
         'MUSIC_2T58_DOMAINS', 'https://www.2t58.com/,https://music.2t58.com/')]
 
