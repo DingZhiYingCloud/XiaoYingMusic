@@ -7,6 +7,7 @@ from urllib.parse import quote
 from django.shortcuts import redirect, render
 from django.http import HttpResponse, HttpResponseBadRequest, StreamingHttpResponse
 from django.core.cache import cache
+from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
@@ -351,54 +352,105 @@ def error_500(request, exception=None):
 
 
 # ============ Sitemap（站点地图） ============
-# 站点内容分三部分：
-#   1. 静态固定 URL：首页/榜单/歌单/MV 列表
-#   2. 歌手 URL：读本地歌手库（见 Web/services/singer_library.py）—— 首页那 24 位，
-#      外加歌手大全的每一个分页。两万多位歌手的入口都在这些列表页里，不必把
-#      两万多条详情页全塞进来（sitemap 会膨胀到几 MB），让爬虫顺着列表页走即可。
-#   3. 动态 URL：调用爬虫抓取首页，提取榜单歌曲生成详情页链接（爬虫失败时自动跳过）
-# 生成结果缓存 6 小时，避免每次请求 sitemap 都触发源站爬虫。
-SITEMAP_STATIC_URLS = [
-    ('/', 'daily', '1.0'),
-    ('/list/new.html', 'daily', '0.8'),
-    ('/list/top.html', 'daily', '0.8'),
-    ('/list/djwuqu.html', 'daily', '0.8'),
-    ('/singerlist/index/index/index/index.html', 'daily', '0.8'),
+# 只放**当前确实可被收录**的页面。sitemap 里出现 noindex 页面是搜索引擎明确不建议的，
+# 所以每一项的收录条件都跟页面模板里的 robots 判定保持同一份数据源：
+#   首页          本地名册非空才列      （模板判的是 hot_singers / random_songs，同源本地库）
+#   榜单页        抓得到歌才列          （模板判的是 songs，见 new_songs.html）
+#   歌手大全分页  本地名册非空才列      （模板判的是 singers，见 singer_list.html）
+#   歌手详情页    只列本地名册里的那 24 位（模板判的是 singer.name）
+#   歌曲详情页    只能从源站榜单现取，抓不到就整体跳过（那时页面是空壳，本身也是 noindex）
+#
+# lastmod 只写**有可信来源**的页面，宁缺勿假 —— Google 对不准的 lastmod 会直接打折扣：
+#   歌手详情页    该歌手曲目的同步时间（songs_synced_at，没同步过就用名册的 pulled_at）
+#   歌手大全分页  该页那 96 位里最近一次同步的时间（见 singer_library.roster_updates）
+#   首页          今天最近一次"整首听完"的时间（今日热听榜就是这一刻变的）
+#   榜单页/歌曲页 内容来自源站实时抓取，本地没有可信时间戳，干脆不写
+#
+# 生成的**路径**列表缓存 6 小时，绝对地址（<loc>）在每次响应时按当前请求的域名拼，
+# 所以换域名不会留下旧域名的死链。原理见 README 第十五章。
+SITEMAP_CHARTS = [
+    ('/list/new.html', 'new'),
+    ('/list/top.html', 'top'),
+    ('/list/djwuqu.html', 'djwuqu'),
 ]
-SITEMAP_CACHE_KEY = 'sitemap_urls'
+SITEMAP_CACHE_KEY = 'sitemap_urls_v2'
 SITEMAP_CACHE_TTL = 60 * 60 * 6  # 6 小时
+# 键名带版本号是刻意的：缓存值是这个列表本身，一旦列表元素的含义/长度变了（比如
+# 这里从 3 元组变成带 lastmod 的 4 元组），服务器上还没过期的旧缓存会在解包时抛异常，
+# 让 /sitemap.xml 500 到缓存过期为止。改结构时顺手把版本号加一最省事。
+# （缓存目录 cache/ 不入库，所以本地清缓存影响不到服务器。）
+
+
+def _chart_has_songs(chart):
+    """榜单页当前有没有歌 —— 跟 new_songs.html 的 robots 用同一份数据
+
+    顺带把这个榜单的页面缓存捂热（两边用的是同一个缓存键）。
+    只在生成 sitemap 时跑（6 小时一次），不影响正常访问。
+    """
+    try:
+        return bool((Music2t58Spider().fetch_chart(chart, 1) or {}).get('songs'))
+    except Exception:
+        return False
+
+
+def _build_sitemap_urls():
+    """收集 sitemap 的 URL：(路径, changefreq, priority, lastmod 或 None)"""
+    urls = []
+    seen = set()
+
+    def add(path, freq, prio, lastmod=None):
+        if path and path not in seen:
+            seen.add(path)
+            urls.append((path, freq, prio, lastmod))
+
+    # 首页歌手墙那 24 位，同时也是名册的前 24 位
+    singers = singer_library.home_singers()
+    if singers:
+        # 首页可见内容跟着「今日热听榜」变；今天还没人听完任何一首就不写 lastmod
+        add('/', 'daily', '1.0', play_rank.latest_play_at())
+
+    for path, chart in SITEMAP_CHARTS:
+        if _chart_has_songs(chart):
+            add(path, 'daily', '0.8')
+
+    if singers:
+        updates = singer_library.roster_updates()
+        for page in range(1, singer_library.total_pages() + 1):
+            add(singer_library.page_url(page), 'daily', '0.8', updates.get(page))
+        for singer in singers:
+            add(singer.link, 'weekly', '0.6',
+                singer.songs_synced_at or singer.pulled_at)
+
+    try:
+        data = Music2t58Spider().fetch_home()
+    except Exception:
+        data = {}
+    for song in (data.get('rising_songs') or []) + (data.get('trending_songs') or []):
+        add(song.get('link'), 'weekly', '0.6')
+
+    return urls
 
 
 def sitemap(request):
-    """sitemap.xml：静态 URL + 本地歌手库的歌手页/歌手大全分页 + 爬虫取的歌曲详情页，缓存 6 小时"""
+    """sitemap.xml：本地歌手库 + 源站榜单歌曲，路径列表缓存 6 小时
+
+    单文件 sitemap 的上限是 5 万条 URL / 50 MB（未压缩），本站只有几百条，够用很久；
+    真要超了再拆成 sitemap index（见 README 第十五章）。
+    """
     urls = cache.get(SITEMAP_CACHE_KEY)
     if urls is None:
-        urls = list(SITEMAP_STATIC_URLS)
-        seen = {path for path, _, _ in urls}
-        # 歌手部分与首页歌手墙、歌手大全同源（本地库），别再回源站取"热门歌手"：
-        # 否则 sitemap 里会出现一批首页上根本没有的歌手页，两边对不上。
-        for singer in singer_library.home_singers():
-            if singer.link not in seen:
-                urls.append((singer.link, 'weekly', '0.6'))
-                seen.add(singer.link)
-        for page in range(1, singer_library.total_pages() + 1):
-            path = singer_library.page_url(page)
-            if path not in seen:
-                urls.append((path, 'daily', '0.8'))
-                seen.add(path)
-        try:
-            data = Music2t58Spider().fetch_home()
-            for song in data.get('rising_songs', []) + data.get('trending_songs', []):
-                if song.get('link') and song['link'] not in seen:
-                    urls.append((song['link'], 'weekly', '0.6'))
-                    seen.add(song['link'])
-        except Exception:
-            pass  # 爬虫失败：歌手与静态 URL 照旧输出
+        urls = _build_sitemap_urls()
         cache.set(SITEMAP_CACHE_KEY, urls, SITEMAP_CACHE_TTL)
     lines = ['<?xml version="1.0" encoding="UTF-8"?>',
              '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
-    for path, freq, prio in urls:
+    for path, freq, prio, lastmod in urls:
         loc = request.build_absolute_uri(path)
-        lines.append(f'  <url><loc>{loc}</loc><changefreq>{freq}</changefreq><priority>{prio}</priority></url>')
+        # lastmod 用 W3C Datetime（秒级 + 时区偏移，形如 2026-09-24T19:16:07+08:00）。
+        # 刻意不带微秒：那不属于 W3C Datetime 的标准写法，个别解析器会判为无效；
+        # 也不省略时区，否则搜索引擎会按 UTC 理解。
+        stamp = (f'<lastmod>{timezone.localtime(lastmod).isoformat(timespec="seconds")}'
+                 f'</lastmod>' if lastmod else '')
+        lines.append(f'  <url><loc>{loc}</loc>{stamp}'
+                     f'<changefreq>{freq}</changefreq><priority>{prio}</priority></url>')
     lines.append('</urlset>')
     return HttpResponse('\n'.join(lines), content_type='application/xml')

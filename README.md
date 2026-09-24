@@ -36,7 +36,7 @@ SQLite 库（歌手名册 / 歌手曲目 / 搜索结果 / 每日播放榜），�
 - **联系我们**：页脚入口，点开弹窗显示微信 / QQ 邮箱 / Telegram 三种联系方式（值全部来自 `.env`）
 - **播放体验**：歌曲页内置播放器（进度/音量/倍速/歌词同步）、播放记忆、断点续播
 - **缓存**：全站数据缓存（1-3 小时可配，按页面类型独立控制），详见下文「缓存机制」
-- **SEO**：sitemap.xml、robots.txt、动态 title/keywords/description、**按页覆写的社交分享卡片（og/twitter）**、**空数据页自动 noindex**、全站友情链接（小影 API，服务端渲染）
+- **SEO**：sitemap.xml（**只收录当前可收录的页面 + 按页给 lastmod**）、robots.txt、动态 title/keywords/description、**按页覆写的社交分享卡片（og/twitter）**、**空数据页自动 noindex**、全站友情链接（小影 API，服务端渲染）。细节与自检方法见第十五章
 
 ## 二、技术架构
 
@@ -246,7 +246,7 @@ DB_ALERT_COOLDOWN_HOURS=24
 | `/list/<chart>.html` | 榜单 | `fetch_chart` |
 | `/download/<sid>/mp3.html` | ~~下载 MP3（`lrc`=歌词，`all`=打包ZIP）~~ **暂时关闭：一律返回 404** | `fetch_download`（代码保留未动） |
 | `/api/play/ended` | 播放页整首播完的计数回调（**只接受 POST**，非页面） | — |
-| `/sitemap.xml` | 站点地图（缓存 6 小时） | 歌手库 + `fetch_home`（只借它取歌曲链接，见 8.11） |
+| `/sitemap.xml` | 站点地图（缓存 6 小时；只收录当前可收录的页面，见第十五章） | 歌手库 + `fetch_chart`（判榜单有没有数据）+ `fetch_home`（取歌曲链接） |
 
 翻页统一是在原地址后加 `/<页码>`，例如 `/singer/<sid>/2.html`、`/so/<keyword>/2.html`。
 
@@ -558,8 +558,8 @@ python manage.py sync_singers --refresh       # 已有外链的也重新下载�
 不再返回"200 的空页面"——否则任意页码都能访问，搜索引擎能收录出无穷多个重复空壳页。
 
 **sitemap 也读本地库**：首页那 24 位歌手页 + 歌手大全全部分页都由 sitemap 输出
-（见 `Web/views/request.py` 的 `sitemap`）。两万多位歌手的入口都在这些列表页里，
-不必把两万多条详情页全塞进 sitemap。
+（见 `Web/views/request.py` 的 `sitemap`，收录条件、lastmod 怎么取见第十五章）。
+两万多位歌手的入口都在这些列表页里，不必把两万多条详情页全塞进 sitemap。
 
 **分页链接**：歌手大全与搜索页共用 `Web/services/pager.py`（页码窗口、省略号、上一页/下一页），
 各页只需传入"这一页的地址怎么拼"。
@@ -803,6 +803,10 @@ python manage.py sync_singer_songs --refresh       # 已同步过的也重新来
 | 刷新后没有自动继续播 | 该功能只在"刷新前正在播放"时触发；若刷新前是暂停状态，需手动点播放按钮（会自动从断点继续） |
 | 提示"浏览器拦截了自动播放" | 浏览器自动播放策略所致，点击播放按钮即可继续播放 |
 | 想改网站 SEO 标题/关键词 | 见 `.trae/documents/底部导航高亮与全站SEO优化.md` 及 `.trae/skills/seo-updater/` |
+| sitemap 里为什么少了某些页面 | 故意的：只收录"此刻确实能收录"的页面。榜单页抓不到数据、源站挂了时，sitemap 会同步剔除它，避免出现"sitemap 里写着却声明 noindex"的自相矛盾。见 15.1 |
+| sitemap 的 lastmod 为什么有的有、有的没有 | 只写有可信来源的：歌手页与歌手大全取同步时间，首页取最近一次听完歌的时间；榜单页和歌曲页内容来自源站实时抓取、本地没有可信时间戳，**宁缺勿假**（不准的 lastmod 会被搜索引擎打折）。见 15.2 |
+| 想给 robots.txt 加 Disallow | 先读 `Web/templates/robots.txt` 里那段注释：`/so/` 与 `/download/` 是**故意不屏蔽**的，拦了会掉长尾收录、或让已经收录的下载页清不掉。见 15.4 |
+| 改了 sitemap / robots 不生效 | `robots.txt` 不缓存，改完立刻生效；sitemap 的**路径列表**缓存 6 小时，想立刻看效果就清 `cache/`（见 8.4）或等过期 |
 
 ## 十一、开发约定
 
@@ -1331,3 +1335,117 @@ find /www/backup/music -name 'db-*.sqlite3' -mtime +7 -delete
   可以考虑回落到「随机点唱机」的数据。
 - **搜索没有兜底**：源站屏蔽的词没有替代方案（屏蔽状态 7 天后会自动重验，但实测一直是被屏蔽的），
   可以考虑源站返回空时回落到本地曲目库做模糊匹配（`icontains` 实测可用，见 8.10 末尾）。
+
+## 十五、SEO 细节（sitemap / robots.txt / meta robots）
+
+这三样是搜索引擎真正会读的东西。下面每条取舍都有实测支撑，改之前先看一眼。
+
+### 15.1 sitemap.xml 只放"当前确实可收录"的页面
+
+搜索引擎明确不建议在 sitemap 里放 noindex 或 404 的地址 —— 那是自相矛盾的信号。
+所以 sitemap 每一项的收录条件，都跟页面模板里的 `block robots` 判定**用同一份数据源**：
+
+| sitemap 里的类型 | 条数（2026-09 实测） | 收录条件 | 对应的模板判定 |
+|---|---|---|---|
+| 首页 | 1 | 本地名册非空 | `hot_singers or random_songs` |
+| 榜单页 ×3 | 3 | 该榜单此刻抓得到歌 | `songs` |
+| 歌手大全分页 | 245 | 本地名册非空 | `singers` |
+| 歌手详情页 | 24 | 本地名册里那 24 位 | `singer.name` |
+| 歌曲详情页 | 106 | 从源站榜单现取，抓不到就整段跳过 | `song.name` |
+
+**实测：379 条 URL 全部返回 200 且是 `index, follow`，一条不合规的都没有。**
+源站全挂时会自动降级成 270 条（只剩本地库页面）—— 而那 3 个榜单页此刻自己也变成了
+`noindex`，两边依然一致（这是刻意对齐的，见 15.5）。
+
+**为什么歌手页只列 24 位**：两万多位歌手的入口都在歌手大全那 245 个列表页里，
+让爬虫顺着列表页往下走就行。把 2 万多条详情页全塞进 sitemap 只会把它撑到几 MB。
+
+### 15.2 lastmod 只写"有可信来源"的页面
+
+Google 用 `lastmod` 判断"要不要重抓"，但**对不准的 lastmod 会直接打折甚至被忽略**。
+所以本站宁缺勿假：
+
+| 类型 | lastmod 取什么 |
+|---|---|
+| 歌手详情页 | 该歌手曲目的同步时间（`songs_synced_at`，没同步过就用名册的 `pulled_at`） |
+| 歌手大全分页 | 该页那 96 位里最近一次同步的时间（`singer_library.roster_updates`） |
+| 首页 | 今天最近一次"整首听完"的时间（今日热听榜就是那一刻变的） |
+| 榜单页 / 歌曲详情页 | **不写** —— 内容来自源站实时抓取，本地没有可信时间戳 |
+
+实测 270/379 条带 lastmod，格式为 W3C Datetime 的**秒级**写法：
+
+```
+<lastmod>2026-09-24T19:16:07+08:00</lastmod>
+```
+
+两个刻意的细节：**不带微秒**（`.128261` 那种不属于标准写法，个别解析器会判无效）、
+**带时区偏移**（省略的话搜索引擎会按 UTC 理解）。
+
+`changefreq` / `priority` 保留着，但要知道 **Google 已明确忽略这两项**（Bing 也只当弱信号），
+真正起作用的是 `lastmod` 和页面本身。
+
+### 15.3 缓存与"换域名"
+
+sitemap 的**路径列表**缓存 6 小时，但 `<loc>` 是每次响应时才用 `request.build_absolute_uri`
+按当前域名拼的 —— 所以换域名后不会残留旧域名的死链（旧写法缓存绝对地址就会）。
+
+> 缓存键是 `sitemap_urls_v2`，**版本号是刻意的**：缓存里存的就是这个列表本身，
+> 元素结构一变（这里从 3 元组变成带 lastmod 的 4 元组），服务器上还没过期的旧缓存
+> 会在解包时抛异常，让 `/sitemap.xml` 500 到缓存过期为止。
+> 以后改结构记得把版本号加一（`cache/` 不入库，本地清缓存救不了服务器）。
+
+单文件 sitemap 的上限是 5 万条 URL / 50 MB（未压缩），本站几百条，离上限很远；
+真到那天再拆成 sitemap index 即可。
+
+### 15.4 robots.txt：为什么只屏蔽了一个地址
+
+```
+User-agent: *
+Disallow: /api/
+Sitemap: https://你的域名/sitemap.xml
+```
+
+**全站允许抓取**，只屏蔽播放计数接口（它只接受 POST、不是页面；robots.txt 只约束爬虫，
+浏览器里的 `fetch` 照常上报，播放计数不受影响）。三个"故意不屏蔽"的路径，理由写在
+`Web/templates/robots.txt` 的注释里，改之前务必读一遍：
+
+| 路径 | 为什么不屏蔽 |
+|---|---|
+| `/so/<关键词>.html` | 搜索页是刻意做成长尾落地页的（有结果时输出 `index, follow`）。**Disallow 会让爬虫读不到页面上的 noindex**，空结果页反而会以"无描述"的形式长期留在索引里 —— 官方建议：想不收录就用 noindex，别用 robots.txt 拦 |
+| `/download/<sid>/…` | 下载已关闭、现在一律 404。**保持 404 才能让搜索引擎把已经收录的下载页清掉**；Disallow 会让爬虫看不到 404，那些页面就一直在索引里挂着 |
+| `/static/`、`/media/` | 必须让爬虫抓到 CSS/JS/图片，否则它对页面的渲染判断会出错 |
+
+`Sitemap:` 用的是当前请求的域名（模板动态拼），换域名不用改这一行。
+
+### 15.5 meta robots：各页面的实际规则
+
+| 页面 | 规则（`template.html` 的 `block robots`） | 什么时候变成 noindex |
+|---|---|---|
+| 首页 | `hot_singers or random_songs` | 本地库全空（还没建库 / 刚清过表） |
+| 歌手大全 | `singers` | 同上 |
+| 歌手详情页 | `singer.name` | 库里查不到这位歌手 |
+| 榜单页 | `songs` | 源站抓不到数据（此时 sitemap 也会把它剔除） |
+| 歌曲详情页 | `song.name` | 源站抓不到这首歌 |
+| 搜索页 | `results` | 这个关键词没有结果（典型薄内容页） |
+| 404 / 500 | 恒 `noindex, follow` | — |
+
+### 15.6 上线后自己验一遍
+
+```bash
+# 1) 两个地址都能开、类型正确
+curl -sI https://你的域名/robots.txt      # 期望 200 + text/plain
+curl -sI https://你的域名/sitemap.xml     # 期望 200 + application/xml
+
+# 2) XML 合法、条数对得上
+curl -s https://你的域名/sitemap.xml | python -c "import sys,xml.etree.ElementTree as ET; print(len(ET.fromstring(sys.stdin.read())), '条 URL')"
+```
+
+然后做三件官方入口的免费事：
+
+1. **Google Search Console** 提交 `/sitemap.xml`，再用"网址检查"抽查首页与任意一个歌手页；
+2. **Bing Webmaster Tools** 同样提交 sitemap（必应支持直接从 GSC 导入）；
+3. 过几天回头看两个后台的"sitemap 已发现 / 已编入"差值 —— 差得多说明有页面被 noindex
+   或抓取失败（源站风控、PHPSESSID 过期都会这样，见 13.14）。
+
+> 上线到 HTTPS 后一定要按 13.9 打开 `USE_X_FORWARDED_PROTO`，
+> 否则 canonical / og:url / sitemap 里全会是 `http://` 地址。

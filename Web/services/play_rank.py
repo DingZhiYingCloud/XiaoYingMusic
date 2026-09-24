@@ -13,16 +13,15 @@ POST /api/play/ended，落到 Web/services/play_rank.py 的 record()；
     往前的日期还在库里，以后想做周榜/月榜不用改表。
 
 榜单不缓存：
-    首页其它模块来自爬虫（有 2 小时页面缓存），但这里是在 fetch_home() 之后**覆盖**
-    字段，覆盖发生在每次请求里，所以榜单是实时的 —— 跨过 00:00 立刻就是新一天的数据，
-    不会出现"昨天的榜还挂到今天"。
+    首页三块数据现在全部读本地库（见 README 8.11），取榜就是在每次请求里查一次 SongPlay，
+    所以跨过 00:00 立刻就是新一天的数据，不会出现"昨天的榜还挂到今天"。
 """
 import logging
 from datetime import timedelta
 
 from django.conf import settings
 from django.db import OperationalError
-from django.db.models import F
+from django.db.models import F, Max
 from django.utils import timezone
 
 from Web.models import SongPlay
@@ -80,6 +79,19 @@ def today_top():
         SongPlay.objects
         .filter(play_date=timezone.localdate())
         .order_by('-plays', '-last_played_at', 'id')[:settings.PLAY_RANK_COUNT]
+    )
+
+
+def latest_play_at():
+    """今天最近一次"整首听完"的时间；今天还没有任何计数时返回 None
+
+    sitemap 拿它当首页的 lastmod：首页的可见内容（今日热听榜）就是在这一刻变的。
+    今天没人听完任何一首时返回 None —— 首页跟昨天一模一样，这时候不该写 lastmod。
+    """
+    return (
+        SongPlay.objects
+        .filter(play_date=timezone.localdate())
+        .aggregate(latest=Max('last_played_at'))['latest']
     )
 
 

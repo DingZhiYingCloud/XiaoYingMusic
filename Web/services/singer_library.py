@@ -103,6 +103,22 @@ def _page_count(total):
     return max(1, -(-total // PAGE_SIZE))
 
 
+def roster_updates():
+    """歌手大全每一页的最近修改时间：{页码: datetime}
+
+    每页内容就是名册里连续 96 位（按 id 升序），所以"这一页变没变"取决于这 96 位里
+    最近一次被同步的时间。一次查询取全量 pulled_at 再按页切片，比每页各发一条聚合
+    查询省 244 次往返 —— sitemap 会一次问全部页。空库返回 {}。
+    """
+    updates = {}
+    for index, pulled_at in enumerate(Singer.objects.order_by('id')
+                                      .values_list('pulled_at', flat=True)):
+        page = index // PAGE_SIZE + 1
+        if page not in updates or pulled_at > updates[page]:
+            updates[page] = pulled_at
+    return updates
+
+
 def total_pages():
     """歌手大全总页数"""
     return _page_count(Singer.objects.count())
