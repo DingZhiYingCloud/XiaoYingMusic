@@ -28,6 +28,12 @@
       .bz-pp-time 内 .jp-current-time + .jp-duration
       #mcover + .djpic .state span；#play_geci / #lrc_list / #lrc_nofound
 
+    本区块有两种互斥形态，由 play_url 决定：
+      有直链 → 控制条 + 歌词 + <audio>（下述钩子全部存在）
+      没直链 → 维护提示（下面 play_url 为空时的兜底分支），此时**刻意不渲染**
+               #bz-audio 与歌词区：song_player.js 取不到 #bz-audio 会直接 return、
+               play.js 取不到 #lrc_list 也会静默退出，两个脚本都不会报错。
+
     下载入口已按需求暂时撤掉（后续开放），所以上面的钩子里没有 #bz-btn-download。
     恢复时把这三块加回本文件即可（后端见 Web/views/request.py 的 download）：
       ① 歌曲信息行右侧的下载按钮 #bz-btn-download（一个 btn btn-sm）
@@ -36,12 +42,13 @@
     {% endcomment %}
     <section class="mt-2 overflow-hidden rounded-box border border-base-300 bg-base-100 shadow-sm">
 
+        {% if song.name %}
         {# 歌曲信息行：唱片封面 + 歌名/歌手（桌面一行，窄屏居中堆叠） #}
         <div class="flex flex-col items-center gap-5 p-5 text-center sm:flex-row sm:gap-6 sm:p-6 sm:text-left">
             <div class="djpic flex shrink-0 flex-col items-center gap-2">
                 <img id="mcover" src="{{ song.cover }}" alt="{{ song.name }}" style="animation-duration:24s"
                     class="h-24 w-24 animate-spin rounded-full object-cover ring-4 ring-base-300 sm:h-28 sm:w-28">
-                <div class="state"><span class="badge badge-ghost badge-sm">已暂停</span></div>
+                {% if play_url %}<div class="state"><span class="badge badge-ghost badge-sm">已暂停</span></div>{% endif %}
             </div>
 
             <div class="min-w-0 flex-1">
@@ -51,7 +58,9 @@
                 </p>
             </div>
         </div>
+        {% endif %}
 
+        {% if play_url %}
         {# 控制条：播放/暂停 · 时间 · 进度 · 音量 · 倍速 #}
         <div class="flex flex-wrap items-center gap-3 border-t border-base-300 bg-base-200/60 px-5 py-3.5">
 
@@ -104,6 +113,46 @@
 
         {# 原生音频元素（由 song_player.js 驱动）#}
         <audio id="bz-audio" preload="none"></audio>
+
+        {% else %}
+        {% comment %}
+        兜底形态：拿不到播放直链时替换整个播放区（控制条 + 歌词 + audio 全部不渲染）。
+        触发条件只有两个来源，模板不区分：
+          ① play.php 没给出直链（全部源站域名都在冷却里）；
+          ② 连歌曲页都没抓到（视图 catch 到异常，song 与 play_url 都为空）。
+        文案口径是"项目正在维护"，**不提任何源站信息** —— 对外只说这一点，
+        别在这里写"音频源不可用"之类会让访客追问的话。维护好之后本模块会自然消失
+        （冷却到期自动重试拿到直链即恢复）。
+        {% endcomment %}
+        <div class="{% if song.name %}border-t border-base-300 {% endif %}px-6 py-14">
+            <div class="mx-auto flex max-w-lg flex-col items-center text-center">
+                {# 唱片图标 + 右下角扳手角标：一眼看出"功能在修"而不是"页面坏了" #}
+                {# 图标大小用 FA 自带的 fa-2x：Tailwind 的 text-3xl 对 .fa 无效（见 index.html 的说明）#}
+                <div class="relative flex h-24 w-24 items-center justify-center rounded-full bg-base-200 ring-1 ring-base-300">
+                    <i class="fa fa-music fa-2x text-primary/60"></i>
+                    <span class="absolute -bottom-1 -right-1 flex h-9 w-9 items-center justify-center rounded-full bg-warning text-warning-content shadow">
+                        <i class="fa fa-wrench"></i>
+                    </span>
+                </div>
+
+                {# 用 h2 而不是 h1：歌名是这首页面的 h1，这里只是页面内的一块状态说明 #}
+                <h2 class="mt-6 text-xl font-bold sm:text-2xl">正在维护中</h2>
+                {% if song.name %}
+                <p class="mt-2 text-sm opacity-60">《{{ song.name }}》暂时听不了，先听听别的吧</p>
+                {% endif %}
+                <p class="mt-5 max-w-md text-sm leading-relaxed opacity-70">
+                    很抱歉，项目正在维护，这部分功能暂时出了点小问题，我们已经在加急处理了。
+                    给你带来不便非常抱歉，请晚些时候再来试试。
+                </p>
+
+                {# 两个出口：刷新（多数维护是短暂的，刷新往往就好了）与回首页（找别的歌听） #}
+                <div class="mt-7 flex flex-wrap items-center justify-center gap-3">
+                    <a href="{{ request.get_full_path }}" class="btn btn-primary btn-sm">刷新试试</a>
+                    <a href="/" class="btn btn-ghost btn-sm">回首页逛逛</a>
+                </div>
+            </div>
+        </div>
+        {% endif %}
     </section>
 
     {# ===== 歌曲说明 + 歌手卡片：两栏并排 ===== #}

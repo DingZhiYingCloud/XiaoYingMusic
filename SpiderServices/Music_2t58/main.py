@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import time
@@ -6,12 +7,16 @@ import threading
 import urllib.parse
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.poolmanager import PoolManager
 from lxml import etree
 from dotenv import load_dotenv
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 
 load_dotenv(override=True)   # 以 .env 为准，避免已存在的环境变量（旧快照）覆盖项目配置
+
+logger = logging.getLogger(__name__)
 
 # ============ 缓存配置 ============
 # 全局默认缓存时长(小时):由 .env 的 CACHE_TTL_HOURS 控制,默认 2 小时(1-3 小时均可)。
@@ -60,16 +65,90 @@ class _CacheAdapter:
 cache = _CacheAdapter()
 
 
+# ============ 源站清单：域名与出站源 IP（都支持多个，用法见 Music2t58Spider）============
+def _env_list(name, default=''):
+    """读逗号分隔的环境变量，去掉空白项；没配或配成空就用 default"""
+    return [item.strip() for item in (os.getenv(name) or default).split(',') if item.strip()]
+
+
+def _normalize_base(raw):
+    """把一条源站域名规整成 `https://主机/` 的形式
+
+    这份清单是手工维护的，写法必须容错 —— 下面三种都认：
+        music.2t58.com / https://music.2t58.com / https://music.2t58.com/
+    下游全是 f'{base}路径' 这样拼的，少写个 https:// 或少了结尾斜杠就会拼出奇怪的
+    URL 而静默失效，所以在这里一次规整好。
+    """
+    base = raw.strip()
+    if not base:
+        return ''
+    if '://' not in base:
+        base = 'https://' + base
+    return base.rstrip('/') + '/'
+
+
+class _SourceIPAdapter(HTTPAdapter):
+    """把出站连接绑定到指定源 IP 的 requests 适配器
+
+    为什么需要：源站按**来源 IP** 拦截，而不只是拦海外 IP。实测同一台服务器上，
+    主 IP 访问 2t58.com 的 80/443 会在 TCP 层被丢包（ping 得通、22 端口也通，
+    只有 Web 端口不通，是定向投的策略而非路由故障），换成同机第二个公网 IP
+    就立刻恢复正常。requests 默认让内核挑源地址，挑不到指定的那个，
+    只能在连接层用 urllib3 的 source_address 强制指定。
+
+    为什么由 .env 控制而不是写死：国内开发机不需要这层绑定，不配
+    MUSIC_2T58_SOURCE_IP 时行为与从前完全一致；换服务器也只需改 .env。
+    """
+
+    def __init__(self, source_address, **kwargs):
+        self._source_address = source_address
+        super().__init__(**kwargs)
+
+    def init_poolmanager(self, connections, maxsize, block=False, **kwargs):
+        kwargs['source_address'] = self._source_address
+        self.poolmanager = PoolManager(num_pools=connections, maxsize=maxsize,
+                                       block=block, **kwargs)
+
+
 class Music2t58Spider:
     """2t58.com 首页数据爬虫
 
     目标站点有人机验证，需在 .env 配置有效的 MUSIC_2T58_PHPSESSID
     （浏览器通过验证后从 cookie 获取，过期需更新）。
+
+    若部署机的主 IP 被源站拦截（症状：ping 通、其它端口通，只有 80/443 不通），
+    在 .env 配 MUSIC_2T58_SOURCE_IP 指定另一个可用 IP 作为出站源地址即可。国内
+    开发机不需要配置。
     """
 
-    HOME_URL = 'https://www.2t58.com/'
+    # ============ 源站域名与故障切换 ============
+    # 源站有多个域名，解析到**不同 IP**（实测 www→103.85.227.61、music→154.222.31.131），
+    # 并且会分别、临时地限制某个域名（实测同一台机器上 www 返回 403 的同一时刻，
+    # music 仍是 200）。所以某个域名抓不到数据就自动切下一条。
+    #
+    # 列表写在 .env 的 MUSIC_2T58_DOMAINS（逗号分隔），**发现新域名直接往后加**，
+    # 条数没有上限，会按顺序逐条试、失败的那条进冷却。写法很随意，
+    # 下面三种都认（由 _normalize_base 统一规整）：
+    #     music.2t58.com / https://music.2t58.com / https://music.2t58.com/
+    #
+    # 不用标注每条域名的播放接口是加密的还是明文的 —— _play_url 会自动识别：
+    # 拿回来是 http(s) 开头就按明文直链用，否则才当密文走 AES 解密。
+    #
+    # 下面是没配 .env 时的兜底清单，也是从源站整理出来的已知域名（完整记录见
+    # 项目根目录 2t58音乐网的全部域名.txt）。
+    DOMAINS = [_normalize_base(d) for d in _env_list(
+        'MUSIC_2T58_DOMAINS', 'https://www.2t58.com/,https://music.2t58.com/')]
+
+    # 某条域名硬失败后冷却多久才再试（秒）。冷却期内直接跳过它，
+    # 否则每个请求都要先在被封的域名上白等一次超时。
+    DOMAIN_COOLDOWN = int(os.getenv('MUSIC_2T58_DOMAIN_COOLDOWN', '300'))
+
+    # 各域名的冷却到期时间 {域名: 时间戳}，多进程共享（见 _domain_order）
+    DOMAIN_BAD_CACHE_KEY = '2t58_bad_domains'
 
     # 模拟浏览器请求头，避免基础反爬拦截
+    # Referer 固定写 www：实测 play.php 的 Referer **不必**与目标域名一致，
+    # 响应格式只由目标域名决定（www 回加密串、music 回明文直链）。
     HEADERS = {
         'User-Agent': (
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
@@ -84,8 +163,7 @@ class Music2t58Spider:
     BLOCKED_MARKERS = ('信息提示', '正在返回首页')
 
     # 歌曲详情页相关配置
-    # 播放链接/歌词接口
-    PLAY_API = 'https://www.2t58.com/js/play.php'
+    # 歌词接口：与主站不同域（js.eev3.com），实测一直可用，所以不参与域名故障切换
     LRC_API = 'https://js.eev3.com/lrc.php'
     # AES 解密密钥（提取自 playen.js，经 SHA256 后用于 AES-ECB 解密播放链接）
     DECRYPT_KEY = 'SklaBTy1aTSEEtMjAyNg'
@@ -110,6 +188,13 @@ class Music2t58Spider:
                 phpsessid = os.getenv('MUSIC_2T58_PHPSESSID', '')
                 if phpsessid:
                     session.cookies.set('PHPSESSID', phpsessid)
+                # 指定出站源 IP（见 _SourceIPAdapter 说明）：不配就交给内核自己挑，
+                # 与从前完全一致 —— 本地开发不需要这一层。
+                source_ip = os.getenv('MUSIC_2T58_SOURCE_IP', '').strip()
+                if source_ip:
+                    adapter = _SourceIPAdapter((source_ip, 0))
+                    session.mount('http://', adapter)
+                    session.mount('https://', adapter)
                 cls._SHARED_SESSION = session
             return cls._SHARED_SESSION
 
@@ -182,12 +267,62 @@ class Music2t58Spider:
         """抓取结果为空(验证未通过/解析不到内容)时返回 True"""
         return not self._has_content(data)
 
-    def _get_html(self, url):
-        """获取页面 HTML，自动处理人机验证
+    # ============ 域名故障切换 ============
+    def _domain_order(self):
+        """本次按顺序要试的域名；**全部处于冷却时返回空列表**（表示这次不发请求）
+
+        状态放 Django cache 而不是类属性：uWSGI 起了多个进程，各记一份的话会出现
+        "这个进程在用 www、那个进程还在撞 music"的错乱。cache 是文件后端，多进程共享。
+
+        为什么全部冷却时返回空列表、而不是"清零后回到第一条重来"：后者听起来更贴合
+        "全试完就重来"，但源站整体不可达时会让**每个请求**都把每条域名重新撞一遍 ——
+        10 秒超时 × 2 条 = 20 秒，比不做切换还慢一倍，冷却也就白做了。返回空列表则是
+        快速失败，页面立刻渲染（数据为空），等冷却到期后自动从第一条重新开始试。
+        """
+        bad = cache.get(self.DOMAIN_BAD_CACHE_KEY) or {}
+        now = time.time()
+        return [d for d in self.DOMAINS if bad.get(d, 0) <= now]
+
+    def _mark_domain_bad(self, base, reason):
+        """把一条域名标记为冷却中，同时记一条日志，方便直接从线上日志看出哪条域名被封了"""
+        bad = cache.get(self.DOMAIN_BAD_CACHE_KEY) or {}
+        bad[base] = time.time() + self.DOMAIN_COOLDOWN
+        cache.set(self.DOMAIN_BAD_CACHE_KEY, bad, self.DOMAIN_COOLDOWN * 4)
+        logger.warning('源站域名 %s 抓取失败，冷却 %s 秒后重试：%s',
+                       base, self.DOMAIN_COOLDOWN, reason)
+
+    def _get_html(self, path):
+        """按域名顺序抓页面，硬失败就换下一条
+
+        path 是**相对路径**（如 'song/xxx.html'，空串表示首页）—— 域名必须由本方法决定，
+        调用方不能自己拼，否则切换域名之后还在用旧域名。
+
+        什么算硬失败：请求抛异常（连接超时、被拒、HTTP 4xx/5xx）或人机验证过不去。
+        刻意**不**把"页面抓回来了但解析不出内容"也算失败 —— 源站两条域名跑的是同一套
+        程序，解析规则一旦失效会同时影响两者，切域名救不了；而空结果在搜索页是合法的。
+        """
+        last_error = None
+        for base in self._domain_order():
+            try:
+                return self._fetch_html(f'{base}{path}')
+            except Exception as e:
+                self._mark_domain_bad(base, e)
+                last_error = e
+        if last_error is None:
+            # 一条可试的域名都没有 = 全部还在冷却期内。刻意不在这里硬撞源站：
+            # 冷却的意义就是"别明知被封还去等超时"，所以直接快速失败。
+            # 冷却到期后 _domain_order 会自动从第一条重新开始试。
+            raise RuntimeError(
+                f'源站域名全部处于冷却中，{self.DOMAIN_COOLDOWN} 秒后自动重试：{path}')
+        raise last_error
+
+    def _fetch_html(self, url):
+        """抓单个 URL 的页面 HTML，自动处理人机验证（不做域名切换）
 
         目标站点验证机制：首次访问返回含 csrf_token 的验证页，
         需 POST 表单（勾选"我不是人机"）通过验证后才返回真实内容，
-        验证状态在 session 中保留约 1 小时。
+        验证状态在 session 中保留约 1 小时。**每条域名各有一套验证状态**（Cookie 按
+        域名分域存放），所以切域名之后会自动在新域名上重新过一次验证。
         """
         resp = self.session.get(url, timeout=10)
         resp.raise_for_status()
@@ -200,6 +335,7 @@ class Music2t58Spider:
         # 必须报错，不能把验证页当正常页面返回：验证页里没有结果列表，曲库会把
         # 「空结果」当成「这个关键词查不到」打上负缓存（默认 12 小时内不再回源），
         # 于是一次验证失效就变成"所有搜索都搜不到"。
+        # 对故障切换来说这也正是想要的信号：验证过不去 = 这条域名当前不可用。
         if '安全人机验证' in html:
             raise RuntimeError(f'人机验证未通过（PHPSESSID 可能已过期）：{url}')
         return html
@@ -249,7 +385,7 @@ class Music2t58Spider:
         )
 
     def _do_fetch_home(self):
-        tree = etree.HTML(self._get_html(self.HOME_URL))
+        tree = etree.HTML(self._get_html(''))
 
         return {
             'hot_singers': self._parse_singers(tree),
@@ -312,8 +448,7 @@ class Music2t58Spider:
         )
 
     def _do_fetch_singer(self, sid, page):
-        url = f'{self.HOME_URL}singer/{sid}/{page}.html'
-        tree = etree.HTML(self._get_html(url))
+        tree = etree.HTML(self._get_html(f'singer/{sid}/{page}.html'))
 
         return {
             'sid': sid,
@@ -418,23 +553,27 @@ class Music2t58Spider:
         # 因为 CDN 直链的时效比歌曲信息短得多。
         data['play_url'] = self._cached(
             self._cache_key('song_play', sid),
-            lambda: self._fetch_play_info(sid, f'{self.HOME_URL}song/{sid}.html')['play_url'],
+            lambda: self._fetch_play_info(sid)['play_url'],
             self._play_ttl(),
         )
         return data
 
     def _do_fetch_song(self, sid):
-        url = f'{self.HOME_URL}song/{sid}.html'
-        tree = etree.HTML(self._get_html(url))
+        tree = etree.HTML(self._get_html(f'song/{sid}.html'))
 
         song_info = self._parse_song_info(tree)
         daily = self._parse_daily_recommend(tree)
-        play_info = self._fetch_play_info(sid, url)
+        play_info = self._fetch_play_info(sid)
         lyrics = self._fetch_lyrics(play_info['cid'])
 
         # 封面图优先用页面解析的，为空时用 play.php 返回的
         if not song_info['cover']:
             song_info['cover'] = play_info['cover']
+
+        # 封面统一升级成 https：源站给的是 http://img1.kuwo.cn/...，而本站走 https，
+        # 浏览器会把 http 图片当混合内容静默拦掉（图不显示，控制台报 Mixed Content）。
+        # 实测同一张图 https 同样返回 200 image/jpeg，直接换协议即可。
+        song_info['cover'] = self._force_https(song_info['cover'])
 
         # 顺手把本次抓取的播放直链写入短缓存，避免被 fetch_song 重复请求 play.php
         if play_info['play_url']:
@@ -456,10 +595,9 @@ class Music2t58Spider:
         由视图层后端代理该直链，避免源站防盗链与链接时效问题。
         注意：下载必须返回最新直链，本方法不缓存。
         """
-        url = f'{self.HOME_URL}song/{sid}.html'
-        tree = etree.HTML(self._get_html(url))
+        tree = etree.HTML(self._get_html(f'song/{sid}.html'))
         song_info = self._parse_song_info(tree)
-        play_info = self._fetch_play_info(sid, url)
+        play_info = self._fetch_play_info(sid)
         lyrics = self._fetch_lyrics(play_info['cid'])
         return {
             'song': song_info,
@@ -479,10 +617,10 @@ class Music2t58Spider:
         """
         encoded = urllib.parse.quote(keyword)
         if page > 1:
-            url = f'{self.HOME_URL}so/{encoded}/{page}.html'
+            path = f'so/{encoded}/{page}.html'
         else:
-            url = f'{self.HOME_URL}so/{encoded}.html'
-        html = self._get_html(url)
+            path = f'so/{encoded}.html'
+        html = self._get_html(path)
         tree = etree.HTML(html)
         results = self._parse_search_results(tree)
 
@@ -533,10 +671,10 @@ class Music2t58Spider:
 
     def _do_fetch_chart(self, chart, page):
         if page > 1:
-            url = f'{self.HOME_URL}list/{chart}/{page}.html'
+            path = f'list/{chart}/{page}.html'
         else:
-            url = f'{self.HOME_URL}list/{chart}.html'
-        tree = etree.HTML(self._get_html(url))
+            path = f'list/{chart}.html'
+        tree = etree.HTML(self._get_html(path))
 
         # 解析页面标题（.play_list .title h1）
         title_nodes = tree.xpath('//div[@class="play_list"]//div[@class="title"]//h1//text()')
@@ -584,9 +722,9 @@ class Music2t58Spider:
         没有"下次再读同一页"的场景），所以刻意不经过页面缓存。
         歌手大全页面本身也不再走这里 —— 它读本地歌手库，见 Web/services/singer_library.py。
         """
-        base = f'{self.HOME_URL}singerlist/{area}/{gender}/{style}/{letter}'
-        url = f'{base}/{page}.html' if page > 1 else f'{base}.html'
-        tree = etree.HTML(self._get_html(url))
+        base_path = f'singerlist/{area}/{gender}/{style}/{letter}'
+        path = f'{base_path}/{page}.html' if page > 1 else f'{base_path}.html'
+        tree = etree.HTML(self._get_html(path))
 
         # 解析页面标题（.singer_list h1）
         title_nodes = tree.xpath('//div[@class="singer_list"]//h1//text()')
@@ -734,29 +872,41 @@ class Music2t58Spider:
             })
         return result
 
-    def _fetch_play_info(self, song_id, page_url):
-        """请求 play.php 获取播放信息：加密播放链接 / 封面图 / 歌词cid"""
-        headers = {
-            'X-Requested-With': 'XMLHttpRequest',
-            'Referer': page_url,
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        }
-        try:
-            resp = self.session.post(
-                self.PLAY_API,
-                data={'id': song_id, 'type': 'music'},
-                headers=headers,
-                timeout=10,
-            )
-            data = resp.json()
-        except (requests.RequestException, ValueError):
-            return {'play_url': '', 'cover': '', 'cid': ''}
+    def _fetch_play_info(self, song_id):
+        """请求 play.php 获取播放信息：播放直链 / 封面图 / 歌词cid（带域名故障切换）
 
-        if data.get('msg') != 1:
+        跟抓页面一样按域名顺序试，因为 play.php 也不是每条域名都能用。实测的坑：
+        www 返回的是**加密串**、music 返回的是**明文直链**（见 _play_url），
+        所以拿到什么格式就按什么格式处理，不能只认加解密那条路。
+        """
+        data = None
+        for base in self._domain_order():
+            try:
+                resp = self.session.post(
+                    f'{base}js/play.php',
+                    data={'id': song_id, 'type': 'music'},
+                    headers={
+                        'X-Requested-With': 'XMLHttpRequest',
+                        # Referer 用当前域名的歌曲页（实测不匹配也能用，但保持真实更稳）
+                        'Referer': f'{base}song/{song_id}.html',
+                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                    },
+                    timeout=10,
+                )
+                data = resp.json()
+            except (requests.RequestException, ValueError) as e:
+                self._mark_domain_bad(base, e)
+                continue
+            # 接口通了但没给数据：不判定域名坏（可能只是这首歌没有可播音频），
+            # 换下一条域名当场再试
+            if data.get('msg') == 1:
+                break
+            data = None
+        if not data:
             return {'play_url': '', 'cover': '', 'cid': ''}
 
         return {
-            'play_url': self._decrypt_play_url(data.get('url', '')),
+            'play_url': self._play_url(data.get('url', '')),
             'cover': data.get('pic', ''),
             'cid': str(data.get('lkid', '')),
         }
@@ -771,6 +921,34 @@ class Music2t58Spider:
             return data.get('lrc', '')
         except (requests.RequestException, ValueError):
             return ''
+
+    @staticmethod
+    def _force_https(url):
+        """把 http:// 开头的地址升级成 https://，其它原样返回
+
+        只用于外链图片（封面）。本站是 https，页面上出现 http 资源会被浏览器
+        按混合内容拦掉，且是静默的 —— 图直接不显示，只有控制台有提示。
+        """
+        return 'https://' + url[7:] if url.startswith('http://') else url
+
+    def _play_url(self, raw):
+        """把 play.php 返回的 url 字段转成可直接播放的地址
+
+        源站不同域名给的格式**不一样**（实测）：
+            www.2t58.com    →  39f8974aabb4150e...                十六进制密文，要 AES 解密
+            music.2t58.com  →  https://car-er.kuwo.cn/xxx.m4a     明文直链，直接用
+        只认解密那一条路的话，切到 music 之后页面有内容但播放不了 —— 直链被当密文，
+        解出来是空串。这是本次排查中实际踩到的坑。
+        """
+        if not raw:
+            return ''
+        if raw.startswith('http'):
+            return raw
+        return self._decrypt_play_url(raw)
+
+    # 注意：上面这套"看开头是不是 http 来判断格式"只对**同一把 AES 密钥**成立。
+    # 以后新增的域名如果换了密钥，加密串照样解不出来（症状：页面有内容但不播放），
+    # 那时再把新密钥加进来按域名分流，不用提前设计。
 
     def _decrypt_play_url(self, encrypted):
         """解密播放链接：AES-ECB，密钥由固定明文经 SHA256 生成"""

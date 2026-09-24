@@ -170,6 +170,14 @@ ANALYTICS_ID=3QisJxfuIZ0dJgUf    # 51.la 统计 ID，留空则不输出统计脚
 
 # ---- 2t58 爬虫：人机验证通过后的 PHPSESSID（浏览器获取，过期需更新）----
 MUSIC_2T58_PHPSESSID=你的PHPSESSID
+# ---- 2t58 爬虫：源站域名列表（可选，见 7.6）----
+# 不填就用代码默认值（www.2t58.com 与 music.2t58.com）
+# MUSIC_2T58_DOMAINS=https://www.2t58.com/,https://music.2t58.com/
+# 某条域名硬失败后的冷却秒数（默认 600）
+# MUSIC_2T58_DOMAIN_COOLDOWN=600
+# ---- 2t58 爬虫：出站源 IP（可选，见 7.5）----
+# 部署机主 IP 被源站拦截时，填这台机器的另一个公网 IP；国内开发机不要填
+# MUSIC_2T58_SOURCE_IP=你的另一个公网IP
 
 # ---- 小影 API 基础地址（友情链接数据源）----
 XIAOYING_API_BASE=http://127.0.0.1:8002
@@ -179,7 +187,10 @@ XIAOYING_APP_SECRET=你的密钥
 
 # ---- 爬虫缓存（见下文「缓存机制」，全部可选，有默认值）----
 CACHE_TTL_HOURS=2
-CACHE_TTL_PLAY_MINUTES=30
+CACHE_TTL_PLAY_MINUTES=60
+# ---- 降回源频率：歌曲页与歌手页的长缓存拉到 6 小时（理由见 8.12）----
+CACHE_TTL_HOURS_SONG=6
+CACHE_TTL_HOURS_SINGER=6
 
 # ---- 曲库：搜索结果本地化（减少回源站次数，见 8.6）----
 SEARCH_KEYWORD_MAX_CHARS=15
@@ -212,11 +223,14 @@ DB_ALERT_COOLDOWN_HOURS=24
 | `SITE_CONTACT_TG` | Telegram（页脚「联系我们」弹窗） | `xiaoying1216` |
 | `ANALYTICS_ID` | 51.la 统计 ID，**留空则不输出统计脚本** | 作者的 ID |
 | `MUSIC_2T58_PHPSESSID` | 源站人机验证凭证，**必填**，过期需更新 | 空 |
+| `MUSIC_2T58_DOMAINS` | 源站域名列表（逗号分隔），用于自动故障切换（见 7.6） | 代码内置的 `www` + `music` |
+| `MUSIC_2T58_DOMAIN_COOLDOWN` | 某条域名硬失败后的冷却秒数（见 7.6） | `600` |
+| `MUSIC_2T58_SOURCE_IP` | 爬虫出站绑定的源 IP。仅在部署机主 IP 被源站拦截时才需要（见 7.5） | 空（交给内核选） |
 | `XIAOYING_API_BASE` | 小影 API 地址（友情链接） | `https://xiaoyingapi.com` |
 | `XIAOYING_APP_ID` | 小影 API 接入项目 APPID（签名用） | 空 |
 | `XIAOYING_APP_SECRET` | 小影 API 签名密钥（**敏感**，仅存 .env，不入库） | 空 |
 | `CACHE_TTL_HOURS` | 全局缓存时长（小时） | `2` |
-| `CACHE_TTL_PLAY_MINUTES` | 播放直链短缓存（分钟） | `30` |
+| `CACHE_TTL_PLAY_MINUTES` | 播放直链短缓存（分钟）。实测直链生成 73 分钟后仍可播，取值理由见 8.12 | `30`（建议配 `60`） |
 | `CACHE_TTL_HOURS_<类型>` | 按页面类型覆盖缓存时长（小时）。**搜索结果不在其中**（走曲库） | 不配用全局 |
 | `SEARCH_KEYWORD_MAX_CHARS` | 搜索关键词最大长度（字符）。搜索框 `maxlength` 与后端截断共用同一个值 | `15` |
 | `SEARCH_KEYWORD_TTL_HOURS` | 关键词保鲜时长（小时），过期后下次搜索同步重爬 | `12` |
@@ -297,8 +311,159 @@ DB_ALERT_COOLDOWN_HOURS=24
 POST 遇到 302 跳转时 requests 会自动把请求**降级为 GET 并丢弃表单数据**，
 结果就是**人机验证永远无法通过 → 所有页面抓不到数据（全站空白）**。
 
-因此 `HOME_URL`、`HEADERS['Referer']`、`PLAY_API` 三处**必须使用带 www 的域名**
-`https://www.2t58.com/`，否则会出现"页面没数据但又查不出原因"的问题。
+因此域名列表里**每一条都要写成带 www 的完整地址**（如 `https://www.2t58.com/`），
+裸域 `https://2t58.com/` 不能用，否则会出现"页面没数据但又查不出原因"的问题。
+域名清单见 `.env` 的 `MUSIC_2T58_DOMAINS` 与 `main.py` 的 `DOMAINS`（见 7.6）。
+`HEADERS['Referer']` 仍固定写 `https://www.2t58.com/` —— 实测 Referer 不必与目标域名
+一致（见 7.6），所以它不参与故障切换，也不用跟着改。
+
+### 7.5 部署机 IP 被源站拦截时改出站源 IP
+
+源站除了拦人机验证，还会**按源 IP 拦截**。被拦时的症状很好认：源站 IP `ping` 得通、
+其它端口（如 22）也通，**只有 80/443 在 TCP 层被丢包** —— 不是 403、不是 5xx，
+而是连接根本建不起来。
+
+线上表现有两处，都很典型：
+
+- 每个需要回源的页面（歌曲页、榜单页、歌手页第 2 页起）都卡满 **10 秒**才吐出空壳
+  —— 那正好是爬虫的 `connect timeout`。歌曲页最直观：`window.BZ_SONG_DATA` 里除
+  `sid` 全是空串，前端因此**一个 mp3 请求都发不出去**，看起来就是"不会播放"；
+- uWSGI 日志里同一路径的耗时整齐地都是 `1001x msecs`，并发一高 worker 就被占满。
+
+在部署机上证三下就能定位：
+
+```bash
+ping -c 3 <源站IP>                                          # 通 → 不是路由问题
+timeout 4 nc -z <源站IP> 22                                 # 通 → 不是整机被墙
+curl -m 10 -o /dev/null -w '%{http_code}\n' https://www.2t58.com/   # 000/超时 → 就是它
+```
+
+**解法**：这台机器若还有另一个公网 IP（`ip -4 addr show` 可见），可以把它填进 `.env`：
+
+```bash
+MUSIC_2T58_SOURCE_IP=你的另一个公网IP
+```
+
+爬虫会用 urllib3 的 `source_address` 把出站连接绑到这个 IP（见 `main.py` 的
+`_SourceIPAdapter`）。**不配这一项时行为与从前完全一致**，国内开发机不需要配。
+
+#### 但实测建议**留空**（两个 IP 是轮着被封的）
+
+2026-09-25 实测：源站的封禁**会在两个 IP 之间来回切**，写死任何一个都会踩雷。
+
+| 时间 | `192.253.235.28`（默认出口） | `118.107.19.79` |
+|---|---|---|
+| 22:40 — 03:00 | 全封（`000`） | 可用（配了它，站点正常） |
+| 03:04 起 | **恢复可用** | 全封（`000`） |
+
+也就是说：上午把 `.env` 指向 `.79` 救活了站点，下午这个值反而变成**唯一全封的那个 IP**，
+站点再次全空白。而且两个维度是独立的 —— 同一时刻 `www.2t58.com` 与 `music.2t58.com`
+的可用性也各不一样（见 7.6），所以要按"源 IP × 域名"四种组合去看。
+
+**结论：`MUSIC_2T58_SOURCE_IP` 留空**（交给内核挑默认出口），不要再写死。
+想利用另一个 IP，正确做法是把它做成和多域名一样的自动切换（目前没做，见 14.6）。
+
+#### 坑：从 `.env` 里**删掉**一个变量，重载（SIGHUP）清不掉
+
+`main.py` 里是 `load_dotenv(override=True)`，而它**只会覆盖文件里存在的键**。
+一旦某个变量进过 `os.environ`，之后从 `.env` 里把它删掉，**进程里那份旧值会一直留着**；
+uWSGI 的 SIGHUP 是**原地 re-exec**，子进程继承父进程被改过的环境，于是重载也带不过去，
+只有真正停掉再启动才会清干净。实测踩到的现象：把 `MUSIC_2T58_SOURCE_IP` 那行注释掉、
+重载后新 worker 仍然绑着旧 IP，站点继续空白。
+
+**两个正确做法**（任选其一）：
+
+```bash
+# 做法一（可以只重载）：写成空值，load_dotenv 会把它覆盖成空串
+MUSIC_2T58_SOURCE_IP=
+
+# 做法二：用宝塔的「重启」真正停掉再起，或 kill 掉 master 后重新拉起
+```
+
+改**新增或改值**的变量不受影响（`override=True` 会覆盖），只有"删除"才有这个问题。
+
+两点值得留意：
+
+- **播放流量不经过服务器**。被封的只有 `www.2t58.com` 的 Web 端口；音频直链所在的
+  酷我 CDN、歌词接口 `js.eev3.com` 都正常，用户浏览器是直接从 CDN 拉音频的，
+  服务器只转发几十 KB 的 HTML 与 JSON，不必为带宽操心。
+- **换 IP 只是绕开，不是治本**。若原 IP 是被源站主动拉黑的（抓取过密），新 IP 用久了
+  同样可能被拉黑，抓取频率仍要控制。
+
+### 7.6 多个源站域名自动切换
+
+源站有多个域名（目前已知两条），**解析到不同 IP**（实测 `www` → `103.85.227.61`、
+`music` → `154.222.31.131`），而且会**按域名分别限流** —— 实测同一台机器上 `www` 返回
+403 的同一时刻，`music` 仍是 200。所以爬虫挂了故障切换：某条域名抓不到就自动切下一条。
+
+域名清单写在 `.env` 的 `MUSIC_2T58_DOMAINS`（逗号分隔），不填就用代码里的默认值，
+就是这两个。切换逻辑在 `main.py` 的 `_domain_order` / `_get_html` / `_fetch_play_info`。
+
+**发现源站新增域名，直接往清单后面加就行**，条数不限，按顺序逐条试：
+
+```ini
+# .env —— 下面三种写法都认，结尾斜杠带不带都行（_normalize_base 会统一规整）
+MUSIC_2T58_DOMAINS=music.2t58.com,https://www.2t58.com,2t58.com
+```
+
+**不需要标注每条域名的播放接口是加密还是明文**：`_play_url` 会看返回值 —— 以 `http(s)`
+开头就按明文直链用，否则才当密文走 AES 解密（详见下面"踩过的坑"）。
+
+> 完整域名记录（含人工核对用的清单）见项目根目录 `2t58音乐网的全部域名.txt`，
+> 那份只供查阅，**不参与运行**，运行时以 `.env` 为准。
+
+**什么算"抓不到"**：请求抛异常（连接超时、被拒、HTTP 4xx/5xx）或人机验证过不去。
+刻意**不**把"页面抓回来了但解析不出内容"也算失败 —— 源站两条域名跑的是同一套程序，
+解析规则一旦失效会同时影响两者，切域名救不了；而空结果在搜索页是合法的。
+
+**冷却**：某条域名硬失败后进入冷却（`MUSIC_2T58_DOMAIN_COOLDOWN`，默认 300 秒），
+这段时间内直接跳过它。没有冷却的话，被封期间每个请求都要先在被封的域名上白等一次
+10 秒超时。冷却状态存在 Django cache 里（**多进程共享**）—— uWSGI 起了 4 个进程，
+各记一份的话会出现"这个进程在用 www、那个进程还在撞 music"的错乱。
+
+**全部域名都在冷却时不发请求，直接快速失败。** 这一条是刻意的取舍：如果照字面
+"全部试完就清零、回到第一条重来"，那么源站整体不可达时**每个请求**都会把每条域名重新
+撞一遍 —— 10 秒超时 × 2 条 = 20 秒，比不做切换还慢一倍，冷却也就白做了。快速失败的实际
+效果是：页面立刻渲染（数据为空），等冷却到期后自动从第一条重新开始试。实测首次失败
+3.4 秒（两条各超时一次），之后每个请求 0.007 秒。
+
+**踩过的坑：两条域名的 play.php 返回格式不一样。**
+
+```
+www.2t58.com    →  "url":"39f8974aabb4150ea58cf1725353fc0c848347f86..."   十六进制密文
+music.2t58.com  →  "url":"https://car-er.kuwo.cn/xxx.m4a?from=vip"       明文直链
+```
+
+最初只按密文处理（AES 解密），切到 `music` 后就是"页面有内容、歌名歌手都对，但不会播放"
+—— 明文直链被当密文解出来是空串。现在 `_play_url` 先判断是不是 `http` 开头：是就直接用，
+否则才解密，所以**加新域名时不用关心它返回哪种格式**。
+
+唯一的例外：这套判断只对**同一把 AES 密钥**成立（密钥 `SklaBTy1aTSEEtMjAyNg` 提取自
+`playen.js`）。以后新增的域名如果换了密钥，加密串一样解不出来，症状同样是"有内容但不播放"
+—— 那时再按域名分流密钥，现在不做这层设计。
+
+顺带实测的两件事（设计上因此简化了）：
+
+- play.php 的 `Referer` **不需要**与目标域名一致（`music` 配 `www` 的 Referer 照样返回明文），
+  响应格式只由目标域名决定；
+- 两条域名**各有一套人机验证状态**（Cookie 按域名分域存放），切过去之后会自动重新过一次验证。
+
+### 7.7 拿不到播放音频时的兜底页面
+
+当 `play.php` 给不出直链（全部源站域名都在冷却里），或者连歌曲页都没抓到（视图 catch 到异常，
+`song` 与 `play_url` 都为空），歌曲页的播放区会整体换成一块「正在维护中」的提示模块，
+**替代**控制条 + 歌词 + `<audio>`（模板见 `Web/templates/song.html` 的兜底分支）。
+
+- **对外口径只说"项目正在维护"，不提任何源站信息。** 访客不需要知道数据从哪来，
+  写"音频源不可用"之类只会引来追问，也会暴露数据来源。
+- 兜底形态下**刻意不渲染** `#bz-audio` 与歌词区：`song_player.js` 取不到 audio 会直接 return、
+  `play.js` 取不到 `#lrc_list` 会静默退出，两个脚本都不会报错（浏览器实测控制台 0 报错）。
+- 歌名/歌手还能拿到时照常显示（访客知道点的是哪首歌），只是没有播放器；
+  整页都没抓到时就只剩兜底模块本身，页面此时是 `noindex`（见模板的 robots 块）。
+- 这是**临时状态**，不需要人工干预：冷却到期后自动重试，一拿到直链页面就恢复成播放器。
+- 图标大小必须用 FA 自带的 `fa-2x`，Tailwind 的 `text-3xl` 对 `.fa` 无效（见 FAQ 与 index.html）。
+- 该模块新增的 Tailwind 类需重编译 CSS 才生效，改模板后别忘跑一次
+  `Web/static-src/css/tailwindcss.exe -i Web/static-src/css/input.css -o Web/static/css/output.css`。
 
 ---
 
@@ -362,9 +527,14 @@ CACHE_TTL_HOURS_CHART=1
 CACHE_TTL_HOURS_SONG=3
 ```
 
-**播放直链单独短缓存**：`CACHE_TTL_PLAY_MINUTES=30`（单位：分钟）。
-CDN 播放直链是有时效的，缓存太久会导致"链接过期播放失败"，
-所以歌曲播放直链单独用短缓存，默认 30 分钟。
+**播放直链单独短缓存**：`CACHE_TTL_PLAY_MINUTES=60`（单位：分钟）。
+CDN 播放直链是有时效的，缓存太久会导致"链接过期播放失败"，所以直链不跟着页面长缓存走，
+单独刷新。默认 60 分钟的依据：**实测一条直链在生成 73 分钟后仍能正常播放**（206），
+取 60 分钟留余量。想进一步减少回源可以调大，但要自己先验证真实有效期 ——
+超过有效期就变成"用户点了播放没声音"。
+
+页面缓存的时长与"超时了怎么补"是两件事：**页面缓存过期时并不会重新生成直链**，
+直链只由它自己的短缓存管。所以歌曲页长缓存拉到 6 小时，播放依然是新的（见 8.12）。
 
 ### 8.3 缓存存哪里、怎么工作
 
@@ -756,6 +926,39 @@ python manage.py sync_singer_songs --refresh       # 已同步过的也重新来
 **唯一还在用 `fetch_home` 的地方是 sitemap**：`Web/views/request.py` 的 `sitemap` 借它取
 歌曲详情页地址（缓存 6 小时）。首页自己已经不用了。
 
+### 8.12 降回源频率（当前取值与理由）
+
+源站会按来源 IP 限流 —— 实测**所有机房 IP（海外机房、国内云厂商）在 Web 端口会被直接拦掉**，
+只有住宅/普通宽带 IP 能进（见 7.5）。所以除了做域名故障切换（7.6），另一条路就是
+**把回源次数压到最低**，让站点在源站不可达时靠缓存撑得更久。
+
+按"一首热歌被持续访问"估算，每小时的源站请求数：
+
+| 配置 | 页面回源 | 直链回源 | 合计 |
+|---|---|---|---|
+| 原值（歌曲页 2h / 直链 30min） | 3 / 2h = 1.5 | 1 / 0.5h = 2.0 | **3.5 / 小时** |
+| 现值（歌曲页 6h / 直链 60min） | 3 / 6h = 0.5 | 1 / 1h = 1.0 | **1.5 / 小时** |
+
+（页面回源一次是 3 个请求：歌曲页 HTML + play.php + 歌词。）
+
+**当前取值**（在 `.env` 里，不写就用代码默认的 2 小时 / 30 分钟）：
+
+```ini
+CACHE_TTL_HOURS_SONG=6        # 歌曲页元数据：歌名/歌手/封面/歌词/每日推荐，
+CACHE_TTL_HOURS_SINGER=6      # 歌手页曲目列表 —— 几小时内都不会变
+CACHE_TTL_PLAY_MINUTES=60     # 直链单独刷新，所以播放始终是新的
+```
+
+榜单页刻意保持全局的 2 小时：它内容变化相对快，而且只有 3 个页面，回源量可以忽略。
+
+**还能再降的两条路**（都需要先验证）：
+
+1. **调大直链缓存**。现在只验证到 73 分钟仍有效，真实有效期未知。要测的话：
+   取一条正在用的直链，每隔半小时 `curl -r 0-8191` 一次，看什么时候开始返回 403。
+   若实测能活 6 小时以上，把 `CACHE_TTL_PLAY_MINUTES` 调到 360，直链回源就再降 6 倍。
+2. **给直链加"失效自动重取"**。前端 `<audio>` 的 `error` 事件回调后端要一条新的直链，
+   这样直链可以缓存很久而不用担心过期。改动比调参数大，但能彻底解开"新鲜度 vs 回源量"的矛盾。
+
 ## 九、播放功能说明
 
 音乐**只能在歌曲详情页（`/song/<sid>.html`）播放**，全站不再有底部悬浮播放条。
@@ -773,11 +976,12 @@ python manage.py sync_singer_songs --refresh       # 已同步过的也重新来
 
 | 问题 | 解决办法 |
 |---|---|
-| 页面数据为空（榜单/歌曲/歌手第 2 页起等） | ① 检查 `main.py` 三处域名是否为带 www 的 `https://www.2t58.com/`（见 7.4，最常见原因）；② 检查 `.env` 的 `MUSIC_2T58_PHPSESSID` 是否过期，更新后重启；③ 源站可能暂时不可达，稍后重试（空数据不会进缓存，源站恢复即自动恢复）。**注意首页不受影响**：它三块数据都读本地库，源站挂了也有内容（见 8.11） |
+| 页面数据为空（榜单/歌曲/歌手第 2 页起等） | ① 检查 `MUSIC_2T58_DOMAINS`（或代码里的默认值）中的域名是否都写成带 `www` 的完整地址（见 7.4，最常见原因）；② 检查 `.env` 的 `MUSIC_2T58_PHPSESSID` 是否过期，更新后重启；③ 部署机 IP 被源站拦截（见 7.5，特征是每个需要回源的页面都卡满 10 秒）→ 配 `MUSIC_2T58_SOURCE_IP`；④ 两条域名都被限流（见 7.6，日志里会有"源站域名 xxx 抓取失败"）→ 等冷却到期，或补新域名到 `MUSIC_2T58_DOMAINS`；⑤ 源站可能暂时不可达，稍后重试（空数据不会进缓存，源站恢复即自动恢复）。**注意首页不受影响**：它三块数据都读本地库，源站挂了也有内容（见 8.11） |
 | 修改代码后页面没变化 | ① 服务是否用 `--noreload` 启动（是则需手动重启）；② 浏览器强刷（Ctrl+F5）绕过本地缓存 |
 | 改了**模板**但页面没变化 | `DEBUG=False` 时 Django 默认启用缓存模板加载器，改模板**必须重启服务**（只有 Python 代码会自动 reload） |
 | 页面某处冒出一段 `{# ... #}` 文字 | 模板里写了跨行 `{# #}`。Django 的 `{# #}` 只支持单行，跨行必须用 `{% comment %}...{% endcomment %}` |
-| 页面样式或功能"写了却没效果" | 模板里新增了 Tailwind 类名但忘了重编译 CSS：`Web/static-src/css/tailwindcss.exe -i Web/static-src/css/input.css -o Web/static/css/output.css`。重编译后 `output.css` 的版本号会自动变化，浏览器会重新拉取 |
+| 页面样式或功能"写了却没效果" | ① 模板里新增了 Tailwind 类名但忘了重编译 CSS：`Web/static-src/css/tailwindcss.exe -i Web/static-src/css/input.css -o Web/static/css/output.css`。重编译后 `output.css` 的版本号会自动变化，浏览器会重新拉取。② **在线上还可能是因为没同步到 `staticfiles/`**，见 13.8 末节 |
+| 改了 CSS/JS 线上没变化（本地却正常） | 线上 nginx 对外服务的是 `staticfiles/`，不是 `Web/static/` —— 两份都要更新。见 13.8 末节 |
 | 给 Font Awesome 图标加 `text-3xl` 之类的字号类没效果 | 正常现象，不是漏编译。FA 4.7 的 `.fa` 里写着 `font-size: inherit`（先 `font: 14px/1 FontAwesome`，紧接着又被 `inherit` 覆盖），而 Tailwind 的工具类包在 `@layer utilities` 里 —— **无层级样式永远压过分层样式**，与优先级、书写顺序都无关，所以图标的字号被 `inherit` 定死，`text-*` 一律无效。正确做法是用 FA 自带的大小类：`fa-lg` / `fa-2x` / `fa-3x` / `fa-4x`。**注意它们是 `em`（相对父级字号），不是固定像素** —— 同一套类在本项目实测：`fa-2x` 在 14px 的 `.card-body` 里是 28px、在 16px 的区块里是 32px；`fa-lg` 是 1.333em、`fa-3x` 是 3em、`fa-4x` 是 4em。**本项目的约定**：卡片图标与空态图标统一写 `fa-2x`，标题旁的行内小图标不写大小类（跟随 `text-sm`，即 14px）。**已全站统一**：`search.html` / `singer.html` / `new_songs.html` 空态原先用的 `text-3xl` 都已改成 `fa-2x` |
 | 改了缓存时长/解析逻辑不生效 | 页面缓存：执行 `python -c "import shutil; shutil.rmtree('cache')"` 清缓存；搜索相关：见下一行 |
 | 搜索页数据不更新 | 曲库有保鲜期（默认 12 小时）。想立刻重来：删掉 `db.sqlite3` 再跑 `python manage.py migrate`（库里全是缓存，删了无损） |
@@ -938,7 +1142,7 @@ python manage.py check --deploy
 | `ALLOWED_HOSTS` | `.env` 填真实域名，多个用逗号分隔 | 不填等于允许任意 Host 头 |
 | `MUSIC_2T58_PHPSESSID` | `.env` 填有效值（见 7.1） | 不配则除首页外的页面都抓不到数据（首页三块全读本地库，见 8.11） |
 | 建表 | `python manage.py migrate` | 曲库三张表（`Song` / `SearchKeyword` / `SearchResult`）、歌手名册表（`Singer`）、歌手曲目表（`SingerSong`）与播放次数表（`SongPlay`）都靠迁移创建，不跑就没有搜索功能、歌手大全是空的、首页「今日热听榜」和「随机点唱机」也是空的 |
-| 静态文件 | 不用做；只在想把静态文件交给 Nginx/CDN 托管时才 `collectstatic` | 本项目静态资源就放在 `Web/static`，开发与生产都直接对外服务（`DEBUG=False` 时由 `XiaoYingMusic/urls.py` 手动挂路由），不依赖 `collectstatic`。真要收集时目标是 `staticfiles/`（与源目录分开） |
+| 静态文件 | **看线上 nginx 指向哪**：指向 `Web/static/` 就不用做；指向 `staticfiles/`（宝塔默认）则每次改完 CSS/JS 都要同步过去 | 静态源目录是 `Web/static`（`DEBUG=False` 时由 `XiaoYingMusic/urls.py` 手动挂路由）。但线上那台 nginx 的 `/static/` 实际指向 `staticfiles/`，**改完不 cp 过去就不生效且不报错** —— 两种配法的差别与自检命令见 13.8 末节 |
 | CSRF 中间件（W003） | 打开 `settings.py` 里注释掉的 `django.middleware.csrf.CsrfViewMiddleware` | 本站目前没有任何 POST 表单（搜索是 GET 跳转），开启不会影响现有功能；以后新增表单记得带 `{% csrf_token %}`。**注意**：`/api/play/ended` 已带 `csrf_exempt`，那里不能删（见 8.9） |
 
 #### HTTPS 相关（站点走 HTTPS 才做）
@@ -970,6 +1174,10 @@ python manage.py check --deploy
 面向「宝塔面板 + Nginx + uWSGI + SQLite」这套组合。全程**不需要 `collectstatic`** ——
 本项目静态文件直接放在 `Web/static`，`DEBUG=False` 时由 Django 自己服务
 （见 `XiaoYingMusic/urls.py`），也可以交给 Nginx 直接发（见 13.8，更快）。
+
+> ⚠️ **但宝塔自动生成的 nginx 配置指向的是 `staticfiles/`，不是 `Web/static/`** ——
+> 本项目线上那台就是这种，这意味着**改完 CSS/JS 要更新两份，否则公网还是旧文件且不报错**。
+> 配错的代价很小（一条 `cp`），踩到的代价很大（查半天查不出）。详见 13.8 末节。
 
 ### 13.1 动手前必须知道的 6 件事
 
@@ -1163,6 +1371,8 @@ server {
 
     # 静态文件交给 Nginx（不经 uWSGI）：本项目不用 collectstatic，
     # 静态源目录就是 Web/static，编译产物 output.css 也在里面。
+    # ⚠️ 宝塔自动生成的 Python 站点配置不是这样 —— 它指向站点下的 staticfiles/，
+    #    那种配法下改完 CSS/JS 必须同步两份，见下面的说明。
     # 注意：location 与 alias 的结尾斜杠必须成对，否则会 404。
     location ^~ /static/ {
         alias /www/wwwroot/BeiZiMusic/Web/static/;
@@ -1188,6 +1398,26 @@ server {
 > 用 `proxy_pass http://127.0.0.1:8001` 也能通（那 `uwsgi.ini` 里要改成 `http = 127.0.0.1:8001`），
 > 对应的一行要写成 `proxy_set_header X-Forwarded-Proto $scheme;`。
 > `/robots.txt`、`/sitemap.xml` 是 Django 视图，**别给它们配静态规则**，必须走反代。
+
+#### ⚠️ `/static/` 到底指向 `Web/static/` 还是 `staticfiles/` —— 上线后必须确认一次
+
+上面这份是**本文档推荐的写法**：`/static/` 直接指向源目录 `Web/static/`，改完文件即生效。
+但**宝塔给 Python 项目自动生成的配置不是这样**，它的 `alias` 指向
+`/www/XiaoYing/小影音乐网/staticfiles/`（本项目线上那台就是这种）。两者差别很致命：
+
+| nginx 的 `/static/` 指向 | 改完 CSS/JS 要做什么 |
+|---|---|
+| `Web/static/`（本文档写法） | 无额外动作，覆盖源文件即生效 |
+| `staticfiles/`（宝塔默认） | **两份都要更新**：`cp -f Web/static/css/output.css staticfiles/css/`。也可以跑 `python manage.py collectstatic`，代价是它会顺带同步 admin 等全部静态文件 |
+
+踩坑表现：对着 `Web/static/` 改完以为好了，公网拉到的还是 `staticfiles/` 里的旧文件
+—— **不报任何错，只是"改了没效果"**，很难往这上面想。所以：
+
+- 查线上指向哪：`grep -n 'static' /www/server/panel/vhost/nginx/你的站点.conf`，
+  看到 `alias .../staticfiles/` 就是宝塔那种。
+- 改完顺手验一次：`curl -s 'https://你的域名/static/css/output.css?v=<页面里的版本号>' | grep -c '你新加的类名'`。
+- `output.css` 的浏览器/CDN 缓存不用手动清：模板里带 `?v={{ STATIC_VERSION }}`（取文件修改时间），
+  覆盖文件后版本号自动变化，缓存自然失效。
 
 ### 13.9 八、HTTPS（建议做）
 
@@ -1267,7 +1497,8 @@ find /www/backup/music -name 'db-*.sqlite3' -mtime +7 -delete
 | 502 Bad Gateway | uWSGI 没起来 / socket 不通 | 看 `logto` 指向的日志；`ps aux \| grep uwsgi`；确认 ini 里的 socket 与 Nginx 的 `uwsgi_pass` 一致 |
 | 样式全丢、CSS 404 | 静态文件没走通 | 确认 `DEBUG=False`（Django 会自己服务 `/static/`）；走 Nginx 时检查 `alias` 两端斜杠与路径 |
 | 改了模板不生效 | `DEBUG=False` 时 Django 用缓存模板加载器 | 重启 uWSGI（FAQ 也有这条） |
-| 除首页外都是空 | `MUSIC_2T58_PHPSESSID` 失效，或服务器 IP 被源站风控 | 重新获取（见 7.1）；换机房 IP 试试 |
+| 除首页外都是空 | ① `MUSIC_2T58_PHPSESSID` 失效；② 部署机 IP 被源站拦截（特征是每个页面都卡满 10 秒） | ① 重新获取（见 7.1）；② 配 `MUSIC_2T58_SOURCE_IP` 换出站 IP（见 7.5）；③ 两条域名都被限流就等冷却，或往 `MUSIC_2T58_DOMAINS` 补新域名（见 7.6） |
+| 歌曲页不会播放、`BZ_SONG_DATA` 里除了 sid 全是空 | 同上 —— 拿不到播放直链，前端连 mp3 请求都发不出去 | 同上，先看 uWSGI 日志里该请求是不是正好 ~10 秒 |
 | 500，日志里 `could not convert string to float` | `.env` 里 `CACHE_TTL_HOURS` 写成了空值 | 填 `2`（已知坑，见 14.2） |
 | 搜索/播放计数没反应 | `db.sqlite3` 或 `cache/` 不可写 | 按 13.10 重新授权，注意**目录**也要可写 |
 | 频繁 `database is locked` | SQLite 写锁冲突 | 把 `processes` 降下来；仍频繁就按 `db_alert` 邮件里的步骤换 MySQL / PostgreSQL |
@@ -1335,6 +1566,18 @@ find /www/backup/music -name 'db-*.sqlite3' -mtime +7 -delete
   可以考虑回落到「随机点唱机」的数据。
 - **搜索没有兜底**：源站屏蔽的词没有替代方案（屏蔽状态 7 天后会自动重验，但实测一直是被屏蔽的），
   可以考虑源站返回空时回落到本地曲目库做模糊匹配（`icontains` 实测可用，见 8.10 末尾）。
+
+### 14.6 源站可达性：只自动化了一半
+
+1. **源 IP 维度没做自动切换。** 2026-09-25 实测，这台机器的两个公网 IP 会**轮流**被源站封
+   （`.28` 先被封 → `.79` 顶了一阵也被封 → `.28` 自己恢复），域名维度也一样（见 7.6）。
+   目前只有**域名**做了自动切换，**源 IP 只能靠人改 `.env`**，改完还得注意 7.5 那个
+   "删掉变量重载清不掉"的坑。正确做法是把源 IP 也做成列表、和域名一起轮询，
+   用 `MUSIC_2T58_SOURCE_IP`（单值）升级为 `MUSIC_2T58_SOURCE_IPS`（多值），
+   组合数从 2 变 4，需要配一套联合的冷却策略。
+2. **冷却时长是固定的，源站恢复后最长得等 10 分钟。** 实测踩到过：源站已经恢复，
+   但两条域名还在 `DOMAIN_COOLDOWN=600` 的冷却里，站点继续空白 6 分钟才自己好。
+   可以把冷却改短（低频回源的场景下代价很小），或者做成"指数退避 + 成功后立刻清零"。
 
 ## 十五、SEO 细节（sitemap / robots.txt / meta robots）
 
