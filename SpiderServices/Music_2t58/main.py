@@ -142,8 +142,26 @@ class Music2t58Spider:
     # 否则每个请求都要先在被封的域名上白等一次超时。
     DOMAIN_COOLDOWN = int(os.getenv('MUSIC_2T58_DOMAIN_COOLDOWN', '300'))
 
-    # 各域名的冷却到期时间 {域名: 时间戳}，多进程共享（见 _domain_order）
+    # 各域名的冷却到期时间 {域名: 时间戳}，多进程共享（见 _alive_bases）
     DOMAIN_BAD_CACHE_KEY = '2t58_bad_domains'
+
+    # ============ 兜底源（最后一层）============
+    # 第一层（上面那组域名）**全部**拿不到时，才走这里。默认是 aat.cx（「爱听音乐网」）
+    # —— 实测它跟 2t58 是**同一套程序的两个版本**：同一个 /js/play.php、同一套榜单 id
+    # （new / top / djwuqu …）、同一个第三方歌词接口，连人机验证的字段名
+    # （csrf_token + human_check）都一样；区别只有三处：
+    #   ① 歌曲页路径是 /t/<id>.html（2t58 是 /song/<id>.html）
+    #   ② 页面里的 id 多了一层十六进制编码（见 _to_fallback_id）
+    #   ③ 首页/歌单/MV 等板块更多，页面结构略有出入（解析规则已做容错）
+    #
+    # 列表写在 .env 的 MUSIC_2T58_FALLBACK_BASES（逗号分隔，写法容错同 DOMAINS）。
+    # ⚠️ 只放**同族站点**（页面结构与 id 编码规则一致），放别的站会安静地指错歌。
+    FALLBACK_BASES = [_normalize_base(d) for d in _env_list(
+        'MUSIC_2T58_FALLBACK_BASES', 'https://www.aat.cx/')]
+
+    # 兜底源的冷却到期时间。**与第一层分开记**：第一层恢复了不该让兜底层陪着一起等，
+    # 反之亦然（两边是不同机房的独立站点，可达性互不相关）。
+    FALLBACK_BAD_CACHE_KEY = '2t58_bad_fallbacks'
 
     # 模拟浏览器请求头，避免基础反爬拦截
     # Referer 固定写 www：实测 play.php 的 Referer **不必**与目标域名一致，
@@ -167,9 +185,34 @@ class Music2t58Spider:
     # AES 解密密钥（提取自 playen.js，经 SHA256 后用于 AES-ECB 解密播放链接）
     DECRYPT_KEY = 'SklaBTy1aTSEEtMjAyNg'
 
-    # 全进程共用的 requests.Session（见 _shared_session）
+    # 全进程共用的 requests.Session（见 _shared_session / _fallback_session）
     _SHARED_SESSION = None
+    _FALLBACK_SESSION = None
     _SESSION_LOCK = threading.Lock()
+
+    @classmethod
+    def _build_session(cls, with_phpsessid):
+        """建一个抓取用 Session：统一请求头 + 出站源 IP 绑定（+ 人机验证 PHPSESSID）
+
+        PHPSESSID 只注入第一层：它是**按域存放**的，而 `cookies.set` 不带 domain 时
+        requests 会把它发给**所有**站点 —— 兜底源收到一个不属于自己的 PHPSESSID 后
+        会重新弹人机验证，验证状态来回失效。所以两层各用各的会话。
+        """
+        session = requests.Session()
+        session.headers.update(cls.HEADERS)
+        # 注入人机验证通过后的 PHPSESSID
+        if with_phpsessid:
+            phpsessid = os.getenv('MUSIC_2T58_PHPSESSID', '')
+            if phpsessid:
+                session.cookies.set('PHPSESSID', phpsessid)
+        # 指定出站源 IP（见 _SourceIPAdapter 说明）：不配就交给内核自己挑，
+        # 与从前完全一致 —— 本地开发不需要这一层。
+        source_ip = os.getenv('MUSIC_2T58_SOURCE_IP', '').strip()
+        if source_ip:
+            adapter = _SourceIPAdapter((source_ip, 0))
+            session.mount('http://', adapter)
+            session.mount('https://', adapter)
+        return session
 
     @classmethod
     def _shared_session(cls):
@@ -181,24 +224,67 @@ class Music2t58Spider:
         """
         with cls._SESSION_LOCK:
             if cls._SHARED_SESSION is None:
-                session = requests.Session()
-                session.headers.update(cls.HEADERS)
-                # 注入人机验证通过后的 PHPSESSID
-                phpsessid = os.getenv('MUSIC_2T58_PHPSESSID', '')
-                if phpsessid:
-                    session.cookies.set('PHPSESSID', phpsessid)
-                # 指定出站源 IP（见 _SourceIPAdapter 说明）：不配就交给内核自己挑，
-                # 与从前完全一致 —— 本地开发不需要这一层。
-                source_ip = os.getenv('MUSIC_2T58_SOURCE_IP', '').strip()
-                if source_ip:
-                    adapter = _SourceIPAdapter((source_ip, 0))
-                    session.mount('http://', adapter)
-                    session.mount('https://', adapter)
-                cls._SHARED_SESSION = session
+                cls._SHARED_SESSION = cls._build_session(with_phpsessid=True)
             return cls._SHARED_SESSION
+
+    @classmethod
+    def _fallback_session(cls):
+        """兜底源共用的 Session：与第一层分开，且不带 2t58 的 PHPSESSID
+
+        兜底源的人机验证由 _pass_verification 自动过（GET 取 csrf_token → POST 表单），
+        实测新会话就能过，不需要提前准备 PHPSESSID；验证状态存在它自己的 PHPSESSID 里，
+        与第一层互不干扰。
+        """
+        with cls._SESSION_LOCK:
+            if cls._FALLBACK_SESSION is None:
+                cls._FALLBACK_SESSION = cls._build_session(with_phpsessid=False)
+            return cls._FALLBACK_SESSION
 
     def __init__(self):
         self.session = self._shared_session()
+        self.fallback_session = self._fallback_session()
+
+    # ============ 跨源 id 转换 ============
+    # 两站的歌曲/歌手 id 是**同一套原始 id 的两层编码**：
+    #     2t58（第一层）  →  base64(原始id)              如 dmhoY2NobQ
+    #     兜底源          →  hex(ascii(base64(原始id)))  如 646d686f59324e6f6251
+    # 内部（缓存键、曲库、URL、模板）统一只认 2t58 那一套：出站时按目标源转码、
+    # 入站时再转回来。实测歌曲 id 与歌手 id 都成立（用 5 位歌手逐一对过页面标题）。
+    #
+    # 为什么必须严格转码：两站 id 形态不同，把兜底源的 id 拿去 2t58 查**不会报错**，
+    # 只会安静地返回另一首歌 —— 属于最难发现的那类 bug。
+    @staticmethod
+    def _to_fallback_id(sid):
+        """内部 id → 兜底源要的 id 写法"""
+        return sid.encode('utf-8').hex()
+
+    @staticmethod
+    def _from_fallback_id(raw_id):
+        """兜底源的 id → 内部 id；不是合法 hex 就原样返回（宁可不动，也别改错）"""
+        try:
+            return bytes.fromhex(raw_id).decode('utf-8')
+        except (ValueError, UnicodeDecodeError):
+            return raw_id
+
+    # 兜底源页面里的 id 链接：/t/<id>.html、/singer/<id>.html、/singer/<id>/<页>.html
+    _FALLBACK_LINK_RE = re.compile(
+        r'href="/(t|singer)/([0-9a-fA-F]{2,})((?:/\d+)?\.html)"')
+
+    @classmethod
+    def _rewrite_fallback_html(cls, html):
+        """把兜底源页面里的 id 链接改写回第一层的形态，让解析规则原样复用
+
+        只改 href 里的这两种路径（t → song、singer 保持），其它一律原样保留。
+        不这么做的话，解析出来的 sid 与链接都是兜底源的 id 写法，一旦拿去第一层查
+        就会安静地指向另一首歌。
+        """
+        def repl(match):
+            kind, raw_id, tail = match.groups()
+            return 'href="/%s/%s%s"' % (
+                'song' if kind == 't' else 'singer',
+                cls._from_fallback_id(raw_id), tail)
+
+        return cls._FALLBACK_LINK_RE.sub(repl, html)
 
     # ============ 缓存辅助方法 ============
     # 每个页面类型对应一个 .env 覆盖项,不配置时用全局 CACHE_TTL_HOURS
@@ -266,70 +352,94 @@ class Music2t58Spider:
         """抓取结果为空(验证未通过/解析不到内容)时返回 True"""
         return not self._has_content(data)
 
-    # ============ 域名故障切换 ============
-    def _domain_order(self):
-        """本次按顺序要试的域名；**全部处于冷却时返回空列表**（表示这次不发请求）
+    # ============ 抓取源故障切换（第一层域名 → 第二层兜底源）============
+    def _alive_bases(self, bases, cache_key):
+        """从一组基址里挑出**不在冷却期内**的，保持原本顺序；全在冷却里就返回空列表
 
         状态放 Django cache 而不是类属性：uWSGI 起了多个进程，各记一份的话会出现
         "这个进程在用 www、那个进程还在撞 music"的错乱。cache 是文件后端，多进程共享。
 
         为什么全部冷却时返回空列表、而不是"清零后回到第一条重来"：后者听起来更贴合
         "全试完就重来"，但源站整体不可达时会让**每个请求**都把每条域名重新撞一遍 ——
-        10 秒超时 × 2 条 = 20 秒，比不做切换还慢一倍，冷却也就白做了。返回空列表则是
-        快速失败，页面立刻渲染（数据为空），等冷却到期后自动从第一条重新开始试。
+        10 秒超时 × N 条，比不做切换还慢一倍，冷却也就白做了。返回空列表则是快速失败，
+        页面立刻渲染（数据为空），等冷却到期后自动从第一条重新开始试。
         """
-        bad = cache.get(self.DOMAIN_BAD_CACHE_KEY) or {}
+        bad = cache.get(cache_key) or {}
         now = time.time()
-        return [d for d in self.DOMAINS if bad.get(d, 0) <= now]
+        return [b for b in bases if bad.get(b, 0) <= now]
 
-    def _mark_domain_bad(self, base, reason):
-        """把一条域名标记为冷却中，同时记一条日志，方便直接从线上日志看出哪条域名被封了"""
-        bad = cache.get(self.DOMAIN_BAD_CACHE_KEY) or {}
+    def _mark_base_bad(self, base, cache_key, label, reason):
+        """把一条基址标记为冷却中，同时记一条日志，方便直接从线上日志看出哪条不行了"""
+        bad = cache.get(cache_key) or {}
         bad[base] = time.time() + self.DOMAIN_COOLDOWN
-        cache.set(self.DOMAIN_BAD_CACHE_KEY, bad, self.DOMAIN_COOLDOWN * 4)
-        logger.warning('源站域名 %s 抓取失败，冷却 %s 秒后重试：%s',
-                       base, self.DOMAIN_COOLDOWN, reason)
+        cache.set(cache_key, bad, self.DOMAIN_COOLDOWN * 4)
+        logger.warning('%s %s 抓取失败，冷却 %s 秒后重试：%s',
+                       label, base, self.DOMAIN_COOLDOWN, reason)
 
-    def _get_html(self, path):
-        """按域名顺序抓页面，硬失败就换下一条
+    def _get_html(self, path, fallback_path=None):
+        """抓页面：先按第一层域名顺序试，**全都拿不到才走兜底源**
 
-        path 是**相对路径**（如 'song/xxx.html'，空串表示首页）—— 域名必须由本方法决定，
-        调用方不能自己拼，否则切换域名之后还在用旧域名。
+        path          第一层用的相对路径（如 'song/xxx.html'，空串表示首页）
+        fallback_path 兜底源用的相对路径；不传就沿用 path（两站多数路径形态相同）。
+                      歌曲页必须传 —— 兜底源是 /t/<转码后的id>.html，见 _to_fallback_id。
+
+        路径由本方法决定而不让调用方拼好整条 URL：否则切了域名还在用旧域名。
 
         什么算硬失败：请求抛异常（连接超时、被拒、HTTP 4xx/5xx）或人机验证过不去。
-        刻意**不**把"页面抓回来了但解析不出内容"也算失败 —— 源站两条域名跑的是同一套
-        程序，解析规则一旦失效会同时影响两者，切域名救不了；而空结果在搜索页是合法的。
+        刻意**不**把"页面抓回来了但解析不出内容"也算失败 —— 同一层里的各条域名跑的是
+        同一套程序（兜底源也是同族站点），解析规则一旦失效会同时影响它们，切了也救不了；
+        而空结果在搜索页是合法的。
         """
-        last_error = None
-        for base in self._domain_order():
+        first_error = None
+        for base in self._alive_bases(self.DOMAINS, self.DOMAIN_BAD_CACHE_KEY):
             try:
                 return self._fetch_html(f'{base}{path}')
             except Exception as e:
-                self._mark_domain_bad(base, e)
+                self._mark_base_bad(base, self.DOMAIN_BAD_CACHE_KEY, '源站域名', e)
+                first_error = e
+        return self._fetch_from_fallback(fallback_path or path, first_error)
+
+    def _fetch_from_fallback(self, path, first_error):
+        """走兜底源抓页面；兜底源也失败时抛错
+
+        为什么放在最后才走：兜底源是别人家的站、页面又是同族程序的另一个版本，
+        能不用就不用 —— 第一层只要还有一条可用，就不该惊动它。
+
+        第一层"全部在冷却中"（一条都没试）同样会走到这里：冷却本身就表示这些域名
+        当前不可用，这时不去兜底，页面就只能一直显示维护提示了。
+
+        抛错时优先抛第一层那个：那才是根因，兜底失败通常只是连带结果。
+        """
+        last_error = None
+        for base in self._alive_bases(self.FALLBACK_BASES, self.FALLBACK_BAD_CACHE_KEY):
+            try:
+                html = self._fetch_html(f'{base}{path}', session=self.fallback_session)
+                return self._rewrite_fallback_html(html)
+            except Exception as e:
+                self._mark_base_bad(base, self.FALLBACK_BAD_CACHE_KEY, '兜底源', e)
                 last_error = e
         if last_error is None:
-            # 一条可试的域名都没有 = 全部还在冷却期内。刻意不在这里硬撞源站：
-            # 冷却的意义就是"别明知被封还去等超时"，所以直接快速失败。
-            # 冷却到期后 _domain_order 会自动从第一条重新开始试。
             raise RuntimeError(
-                f'源站域名全部处于冷却中，{self.DOMAIN_COOLDOWN} 秒后自动重试：{path}')
-        raise last_error
+                f'兜底源全部处于冷却中，{self.DOMAIN_COOLDOWN} 秒后自动重试：{path}')
+        raise first_error or last_error
 
-    def _fetch_html(self, url):
-        """抓单个 URL 的页面 HTML，自动处理人机验证（不做域名切换）
+    def _fetch_html(self, url, session=None):
+        """抓单个 URL 的页面 HTML，自动处理人机验证（不做切换）
 
         目标站点验证机制：首次访问返回含 csrf_token 的验证页，
         需 POST 表单（勾选"我不是人机"）通过验证后才返回真实内容，
         验证状态在 session 中保留约 1 小时。**每条域名各有一套验证状态**（Cookie 按
         域名分域存放），所以切域名之后会自动在新域名上重新过一次验证。
+        兜底源是另一个域、另一套 Cookie，所以走它自己的 session（见 _fallback_session）。
         """
-        resp = self.session.get(url, timeout=10)
+        session = session or self.session
+        resp = session.get(url, timeout=10)
         resp.raise_for_status()
         # 优先用 Content-Type 声明的编码；无声明（requests 默认 ISO-8859-1）时回退到 chardet 检测
         html = self._fix_encoding(resp).text
         # 命中人机验证页时，提交表单通过验证后重新请求原页面
         if 'csrf_token' in html and '安全人机验证' in html:
-            html = self._pass_verification(url, html)
+            html = self._pass_verification(url, html, session=session)
         # 过完验证仍是验证页 → PHPSESSID 失效或源站改了验证流程，这次抓取是失败的。
         # 必须报错，不能把验证页当正常页面返回：验证页里没有结果列表，曲库会把
         # 「空结果」当成「这个关键词查不到」打上负缓存（默认 12 小时内不再回源），
@@ -339,12 +449,16 @@ class Music2t58Spider:
             raise RuntimeError(f'人机验证未通过（PHPSESSID 可能已过期）：{url}')
         return html
 
-    def _pass_verification(self, url, html):
+    def _pass_verification(self, url, html, session=None):
         """提交人机验证表单（csrf_token + human_check），返回通过验证后的真实页面 HTML
 
         关键：POST 必须带 Referer + Origin 头，否则服务端返回 200 验证页（不跳转），
         验证永不生效；带上后返回 302 跳转，requests 自动跟随即拿到真实页面。
+
+        字段名与流程两站通用（2t58 与兜底源是同一套验证程序），所以这条逻辑不用分源；
+        只有 session 要分 —— 验证状态是记在各自 PHPSESSID 上的。
         """
+        session = session or self.session
         tree = etree.HTML(html)
         csrf_nodes = tree.xpath('//input[@name="csrf_token"]')
         if not csrf_nodes:
@@ -352,14 +466,14 @@ class Music2t58Spider:
         csrf_token = csrf_nodes[0].get('value', '')
         origin = urllib.parse.urlparse(url).scheme + '://' + urllib.parse.urlparse(url).netloc
         # 勾选"我不是人机"并提交，session 自动保存验证状态
-        resp = self.session.post(url, data={'csrf_token': csrf_token, 'human_check': 'on'},
-                                 headers={'Referer': url, 'Origin': origin}, timeout=10)
+        resp = session.post(url, data={'csrf_token': csrf_token, 'human_check': 'on'},
+                            headers={'Referer': url, 'Origin': origin}, timeout=10)
         # 先修编码再判断中文标记：POST 回来的验证页一般是 GBK，requests 默认按
         # ISO-8859-1 解码时「安全人机验证」肯定匹配不上，就会漏掉下面的兜底 GET。
         resp = self._fix_encoding(resp)
         # 若 POST 跟随后仍是验证页，再 GET 一次兜底
         if '安全人机验证' in resp.text:
-            resp = self._fix_encoding(self.session.get(url, timeout=10))
+            resp = self._fix_encoding(session.get(url, timeout=10))
         return resp.text
 
     @staticmethod
@@ -386,24 +500,33 @@ class Music2t58Spider:
     def _do_fetch_home(self):
         tree = etree.HTML(self._get_html(''))
 
+        # 板块名按两站各传一遍：兜底源没有「歌曲飙升榜」，它那个位置的歌曲列表叫「新歌排行」；
+        # 「流行趋势榜」在兜底源没有对应板块（找不到就是空列表，sitemap 少几条链接而已）。
         return {
             'hot_singers': self._parse_singers(tree),
-            'rising_songs': self._parse_songs(tree, '歌曲飙升榜'),
+            'rising_songs': self._parse_songs(tree, '歌曲飙升榜', '新歌排行'),
             'trending_songs': self._parse_songs(tree, '流行趋势榜'),
         }
 
-    def _section(self, tree, h1_keyword):
-        """通过 h1 文本定位所在的 .layui-row.lkbj 区块"""
-        expr = (
-            '//div[contains(@class,"layui-row") and contains(@class,"lkbj") '
-            'and .//h1[contains(text(),"%s")]]'
-        ) % h1_keyword
-        rows = tree.xpath(expr)
-        return rows[0] if rows else None
+    def _section(self, tree, *h1_keywords):
+        """通过 h1 文本定位所在的 .layui-row.lkbj 区块；返回第一个命中的区块
+
+        可以传多个候选名：两站是同一套程序的两个版本，同一个板块叫法不一样
+        （2t58 叫「歌曲飙升榜」、兜底源叫「新歌排行」），按顺序试到哪个算哪个。
+        """
+        for keyword in h1_keywords:
+            expr = (
+                '//div[contains(@class,"layui-row") and contains(@class,"lkbj") '
+                'and .//h1[contains(text(),"%s")]]'
+            ) % keyword
+            rows = tree.xpath(expr)
+            if rows:
+                return rows[0]
+        return None
 
     def _parse_singers(self, tree):
         """解析热门歌手：name / link / pic"""
-        row = self._section(tree, '热门歌手')
+        row = self._section(tree, '热门歌手', '推荐歌手')
         if row is None:
             return []
         result = []
@@ -419,20 +542,17 @@ class Music2t58Spider:
             })
         return result
 
-    def _parse_songs(self, tree, h1_keyword):
-        """解析歌曲榜单：title / link"""
-        row = self._section(tree, h1_keyword)
+    def _parse_songs(self, tree, *h1_keywords):
+        """解析歌曲榜单：title / link（h1_keywords 是板块名的候选，见 _section）"""
+        row = self._section(tree, *h1_keywords)
         if row is None:
             return []
         result = []
         for li in row.xpath('.//li'):
-            a = li.xpath('.//div[@class="name"]/a')
-            if not a:
+            title, link = self._song_row(li)
+            if not title:
                 continue
-            result.append({
-                'title': (a[0].text or '').strip(),
-                'link': a[0].get('href', ''),
-            })
+            result.append({'title': title, 'link': link})
         return result
 
     def fetch_singer(self, sid, page=1):
@@ -447,7 +567,10 @@ class Music2t58Spider:
         )
 
     def _do_fetch_singer(self, sid, page):
-        tree = etree.HTML(self._get_html(f'singer/{sid}/{page}.html'))
+        tree = etree.HTML(self._get_html(
+            f'singer/{sid}/{page}.html',
+            # 兜底源上歌手页路径形态一样，只有 id 要转码
+            fallback_path=f'singer/{self._to_fallback_id(sid)}/{page}.html'))
 
         return {
             'sid': sid,
@@ -474,14 +597,11 @@ class Music2t58Spider:
     def _parse_singer_songs(self, tree):
         """解析歌手歌曲列表：title / link"""
         result = []
-        for li in tree.xpath('//div[@class="play_list"]//li'):
-            a = li.xpath('.//div[@class="name"]/a')
-            if not a:
+        for li in tree.xpath(self._SONG_LIST_XPATH):
+            title, link = self._song_row(li)
+            if not title:
                 continue
-            result.append({
-                'title': (a[0].text or '').strip(),
-                'link': a[0].get('href', ''),
-            })
+            result.append({'title': title, 'link': link})
         return result
 
     def _parse_pagination(self, tree):
@@ -558,7 +678,10 @@ class Music2t58Spider:
         return data
 
     def _do_fetch_song(self, sid):
-        tree = etree.HTML(self._get_html(f'song/{sid}.html'))
+        tree = etree.HTML(self._get_html(
+            f'song/{sid}.html',
+            # 兜底源的歌曲页目录是 t/（不是 song/），且 id 要转码
+            fallback_path=f't/{self._to_fallback_id(sid)}.html'))
 
         song_info = self._parse_song_info(tree)
         daily = self._parse_daily_recommend(tree)
@@ -594,7 +717,10 @@ class Music2t58Spider:
         由视图层后端代理该直链，避免源站防盗链与链接时效问题。
         注意：下载必须返回最新直链，本方法不缓存。
         """
-        tree = etree.HTML(self._get_html(f'song/{sid}.html'))
+        tree = etree.HTML(self._get_html(
+            f'song/{sid}.html',
+            # 兜底源的歌曲页目录是 t/（不是 song/），且 id 要转码
+            fallback_path=f't/{self._to_fallback_id(sid)}.html'))
         song_info = self._parse_song_info(tree)
         play_info = self._fetch_play_info(sid)
         lyrics = self._fetch_lyrics(play_info['cid'])
@@ -675,9 +801,8 @@ class Music2t58Spider:
             path = f'list/{chart}.html'
         tree = etree.HTML(self._get_html(path))
 
-        # 解析页面标题（.play_list .title h1）
-        title_nodes = tree.xpath('//div[@class="play_list"]//div[@class="title"]//h1//text()')
-        title = ''.join(title_nodes).strip()
+        # 解析页面标题（容器两版页面通用，见 _LIST_TITLE_XPATH）
+        title = ''.join(tree.xpath(self._LIST_TITLE_XPATH)).strip()
 
         return {
             'title': title,
@@ -780,22 +905,51 @@ class Music2t58Spider:
             result.append({'label': label, 'options': options})
         return result
 
+    # ============ 歌曲列表行（两版页面通用）============
+    # 第一层与兜底源是**同一套程序的两个版本**，行结构只差一点：
+    #     2t58   <div class="name"><a href="/song/<id>.html">歌手 - 歌名</a></div>
+    #     兜底源 <div class="name"><a href="/t/<id>.html" title="歌手 - 歌名">
+    #                <span class="sname">歌名</span><a href="/v/<id>.html">mv</a></a></div>
+    # 兜底源那个 <a> 的文本是空的（首个子节点是元素），所以标题要按
+    # @title → 文本 → span.sname 依次回退 —— 只认文本的话整页一条都解析不出来。
+    #
+    # 容器写法同理：2t58 是 div.play_list，兜底源是 div.lkmusic_list
+    # （搜索页 "lkmusic_list lkbj sovd"、歌手页 "video_list lkmusic_list"、榜单页同）。
+    # 用 contains 而不是 = ：源站会在同一个 class 属性里挂好几个类名。
+    _SONG_LIST_XPATH = (
+        '//div[contains(@class,"play_list") or contains(@class,"lkmusic_list")]'
+        '//li[.//div[@class="name"]/a]')
+    # 榜单页/搜索页的标题块（_do_fetch_chart 用）
+    _LIST_TITLE_XPATH = (
+        '//div[contains(@class,"play_list") or contains(@class,"lkmusic_list")]'
+        '//div[@class="title"]//h1//text()')
+
+    def _song_row(self, li):
+        """从一行里取 (标题, 链接)；取不到标题时返回 (None, None)，由调用方跳过该行"""
+        a = li.xpath('.//div[@class="name"]/a')
+        if not a:
+            return None, None
+        a = a[0]
+        title = (a.get('title') or '').strip()
+        if not title:
+            title = (a.text or '').strip()
+        if not title:
+            sname = a.xpath('./span[@class="sname"]/text()')
+            title = sname[0].strip() if sname else ''
+        return (title or None), a.get('href', '')
+
     def _parse_search_results(self, tree):
         """解析搜索结果列表：title / link / sid / name / singers
 
-        结构与每日推荐一致（div.play_list ul li）。
+        搜索结果与榜单、每日推荐用的是同一套行结构（见 _SONG_LIST_XPATH）。
         title 保留源站原文（格式「歌手 - 歌名」）供列表直接渲染；
         另外拆出 sid / name / singers，让曲库入库时不必再解析一遍标题。
         """
         result = []
-        for li in tree.xpath('//div[@class="play_list"]//ul/li'):
-            a = li.xpath('.//div[@class="name"]/a')
-            if not a:
-                continue
-            title = (a[0].text or '').strip()
+        for li in tree.xpath(self._SONG_LIST_XPATH):
+            title, link = self._song_row(li)
             if not title:
                 continue
-            link = a[0].get('href', '')
             artists, song_name = self._parse_song_title(title)
             result.append({
                 'title': title,
@@ -856,51 +1010,34 @@ class Music2t58Spider:
                 'singer_url': singer_url}
 
     def _parse_daily_recommend(self, tree):
-        """解析"每日推荐"歌曲列表：title / link"""
+        """解析"每日推荐"歌曲列表：title / link
+
+        兜底源没有这个板块，解析结果为空 —— 歌曲页少一块推荐而已，不影响播放与主信息。
+        """
         result = []
-        for li in tree.xpath('//div[@class="play_list"]//ul/li'):
-            a = li.xpath('.//div[@class="name"]/a')
-            if not a:
-                continue
-            title = (a[0].text or '').strip()
+        for li in tree.xpath(self._SONG_LIST_XPATH):
+            title, link = self._song_row(li)
             if not title:
                 continue
-            result.append({
-                'title': title,
-                'link': a[0].get('href', ''),
-            })
+            result.append({'title': title, 'link': link})
         return result
 
     def _fetch_play_info(self, song_id):
-        """请求 play.php 获取播放信息：播放直链 / 封面图 / 歌词cid（带域名故障切换）
+        """请求 play.php 获取播放信息：播放直链 / 封面图 / 歌词cid（带故障切换）
 
-        跟抓页面一样按域名顺序试，因为 play.php 也不是每条域名都能用。实测的坑：
-        www 返回的是**加密串**、music 返回的是**明文直链**（见 _play_url），
-        所以拿到什么格式就按什么格式处理，不能只认加解密那条路。
+        跟抓页面一样：先按第一层域名顺序试，**全都不行才走兜底源**。实测的坑：
+        第一层里 www 返回的是**加密串**、music 返回的是**明文直链**（见 _play_url），
+        兜底源回的也是明文 —— 拿到什么格式就按什么格式处理，不能只认加解密那条路。
         """
-        data = None
-        for base in self._domain_order():
-            try:
-                resp = self.session.post(
-                    f'{base}js/play.php',
-                    data={'id': song_id, 'type': 'music'},
-                    headers={
-                        'X-Requested-With': 'XMLHttpRequest',
-                        # Referer 用当前域名的歌曲页（实测不匹配也能用，但保持真实更稳）
-                        'Referer': f'{base}song/{song_id}.html',
-                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                    },
-                    timeout=10,
-                )
-                data = resp.json()
-            except (requests.RequestException, ValueError) as e:
-                self._mark_domain_bad(base, e)
-                continue
-            # 接口通了但没给数据：不判定域名坏（可能只是这首歌没有可播音频），
-            # 换下一条域名当场再试
-            if data.get('msg') == 1:
-                break
-            data = None
+        data = self._request_play_info(self.DOMAINS, self.DOMAIN_BAD_CACHE_KEY, '源站域名',
+                                       song_id, f'song/{song_id}.html', self.session)
+        if data is None:
+            # 兜底源：接口路径、参数、请求头完全一样，只有两处不同 ——
+            # id 要转码（见 _to_fallback_id）、歌曲页目录叫 t/ 而不是 song/。
+            fallback_id = self._to_fallback_id(song_id)
+            data = self._request_play_info(
+                self.FALLBACK_BASES, self.FALLBACK_BAD_CACHE_KEY, '兜底源',
+                fallback_id, f't/{fallback_id}.html', self.fallback_session)
         if not data:
             return {'play_url': '', 'cover': '', 'cid': ''}
 
@@ -909,6 +1046,35 @@ class Music2t58Spider:
             'cover': data.get('pic', ''),
             'cid': str(data.get('lkid', '')),
         }
+
+    def _request_play_info(self, bases, cache_key, label, song_id, song_path, session):
+        """按 base 顺序请求 play.php，返回第一个可用的响应；全都拿不到返回 None
+
+        song_id 与 song_path 都必须用**该源自己的写法**，由调用方负责转码 ——
+        两站的 id 形态不同，传错了不会报错，只会安静地返回另一首歌的数据。
+        """
+        for base in self._alive_bases(bases, cache_key):
+            try:
+                resp = session.post(
+                    f'{base}js/play.php',
+                    data={'id': song_id, 'type': 'music'},
+                    headers={
+                        'X-Requested-With': 'XMLHttpRequest',
+                        # Referer 用当前域名的歌曲页（实测不匹配也能用，但保持真实更稳）
+                        'Referer': f'{base}{song_path}',
+                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                    },
+                    timeout=10,
+                )
+                data = resp.json()
+            except (requests.RequestException, ValueError) as e:
+                self._mark_base_bad(base, cache_key, label, e)
+                continue
+            # 接口通了但没给数据：不判定域名坏（可能只是这首歌没有可播音频），
+            # 换下一条域名当场再试
+            if data.get('msg') == 1:
+                return data
+        return None
 
     def _fetch_lyrics(self, cid):
         """请求 lrc.php 获取 LRC 格式歌词文本（带时间标签，供前端 window.BZLrc 同步滚动）"""
