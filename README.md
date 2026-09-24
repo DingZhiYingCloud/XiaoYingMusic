@@ -1,26 +1,42 @@
-# 杯子音乐网 - 只专注好听|安静的音乐
+# 小影音乐网 - 只专注好听|安静的音乐
 
-一个**纯爬虫架构**的音乐网站：没有数据库，页面数据实时抓取自源站（2t58.com），
-抓取结果自动缓存到本地文件，避免每次访问都去打扰源站。
+一个**爬虫 + 本地库**架构的音乐网站：数据抓取自源站（2t58.com），并逐步沉淀到本地
+SQLite 库（歌手名册 / 歌手曲目 / 搜索结果 / 每日播放榜），让回源次数越用越少；
+抓取结果另有一层文件缓存兜底，同一个页面在缓存期内只回源一次。
+
+纯服务端渲染（Django 模板），前端只用了原生 JS + Tailwind CSS + daisyUI，**不依赖 jQuery**。
 
 - 微信: duyanbz
 - tg: <https://t.me/xiaoying1216>
 
 ---
 
+## 界面预览
+
+桌面端（1440×900）：
+
+| | |
+|---|---|
+| **首页**<br>三块数据全部读本地库，一次源站都不请求（见 8.11）<br>![首页](docs/screenshots/01-home.png) | **歌手大全**<br>本地名册全量分页，2 万+ 位歌手<br>![歌手大全](docs/screenshots/02-singer-list.png) |
+| **歌手详情**<br>已同步曲目的歌手第 1 页整页本地渲染（见 8.10）<br>![歌手详情](docs/screenshots/03-singer.png) | **歌曲详情**<br>页面内播放器：进度/音量/倍速/歌词同步<br>![歌曲详情](docs/screenshots/04-song.png) |
+| **搜索结果**<br>结果沉淀到本地曲库，同词不重复回源（见 8.6）<br>![搜索结果](docs/screenshots/05-search.png) | **榜单页**<br>33 个榜单，名称已本地化改写<br>![榜单页](docs/screenshots/06-chart.png) |
+| **「联系我们」弹窗**<br>页脚入口，三种联系方式来自 `.env`<br>![联系我们](docs/screenshots/07-contact-modal.png) | **移动端首页**<br>响应式 + 底部 dock 导航<br>![移动端首页](docs/screenshots/08-mobile-home.png) |
+
+---
+
 ## 一、功能特性
 
-- **首页**：热门歌手 / 歌曲飙升榜 / 流行趋势榜 三大板块
-- **歌手**：歌手大全（分类筛选）、歌手详情（作品列表 + 分页）
+- **首页**：整页读本地库，**一次源站都不请求**（见 8.11）——「今日推荐」主模块由歌手推荐墙 + 右侧「今日热听榜（每日播放榜）/ 随机点唱机」两个附属子模块（三栏并排）
+- **歌手**：歌手大全（本地名册全量分页，2 万+ 位）、歌手详情（作品列表 + 分页；已同步曲目的歌手第 1 页整页本地渲染，见 8.10）
 - **歌曲**：歌曲详情页、在线播放、歌词同步滚动、每日推荐
+- **每日播放榜**：整首播完才计数，首页「今日热听榜」按北京时间当天重算，详见「每日播放榜」一节
 - **搜索**：关键词搜索（中文/空格自动处理）
 - **榜单**：33 个热门榜单（名称已本地化改写，规避与源站雷同）
-- **歌单**：歌单精选（分类筛选）、歌单详情
-- **MV**：映像MV大全（分类筛选）、MV 详情（DPlayer 多清晰度播放）
-- **下载**：MP3 / 歌词 / 打包 ZIP（后端代理转发，破解 CDN 防盗链）
-- **播放体验**：全局底部播放条、播放记忆续播、倍速播放、刷新自动续播
+- **下载（暂时关闭）**：MP3 / 歌词 / 打包 ZIP 的代码仍在，但前端入口已撤、后端 `/download/...` 直接返回 404，后续会开放。重新开放的步骤见 FAQ
+- **联系我们**：页脚入口，点开弹窗显示微信 / QQ 邮箱 / Telegram 三种联系方式（值全部来自 `.env`）
+- **播放体验**：歌曲页内置播放器（进度/音量/倍速/歌词同步）、播放记忆、断点续播
 - **缓存**：全站数据缓存（1-3 小时可配，按页面类型独立控制），详见下文「缓存机制」
-- **SEO**：sitemap.xml、robots.txt、动态 title/keywords/description、全站友情链接（小影 API，服务端渲染）
+- **SEO**：sitemap.xml、robots.txt、动态 title/keywords/description、**按页覆写的社交分享卡片（og/twitter）**、**空数据页自动 noindex**、全站友情链接（小影 API，服务端渲染）
 
 ## 二、技术架构
 
@@ -29,16 +45,30 @@
   │  HTTP 请求
   ▼
 Django（6.1）
-  ├── 视图层  Web/views/request.py      ← 每个页面/接口一个视图，异常自动降级空数据
-  ├── 爬虫层  SpiderServices/Music_2t58 ← 实时抓取源站数据（requests + lxml + AES解密）
-  ├── 缓存层  Django FileBasedCache      ← 爬虫结果缓存到本地 cache/ 目录（零依赖）
-  ├── 模板层  Web/templates              ← Django 模板 + layui + jPlayer/DPlayer
-  └── 中间件  middlewares/request_detect.py（请求身份识别，默认关闭）
+  ├── 视图层  Web/views/request.py          ← 每个页面/接口一个视图，异常自动降级空数据
+  ├── 曲库层  Web/services/music_library.py ← 搜索结果落本地库，同一个关键词不重复回源（见 8.6）
+  ├── 歌手库  Web/services/singer_library.py← 首页歌手墙与随机点唱机、歌手大全、歌手页第 1 页读本地歌手/曲目库，不回源（见 8.8 / 8.10 / 8.11）
+  ├── 播放榜  Web/services/play_rank.py    ← 播放页整首播完才计数，首页「今日热听榜」按天取前几（见 8.9）
+  ├── 爬虫层  SpiderServices/Music_2t58     ← 实时抓取源站数据（requests + lxml + AES解密）
+  ├── 缓存层  Django FileBasedCache         ← 页面级缓存，落在 cache/ 目录（零依赖）
+  └── 模板层  Web/templates                 ← Django 模板 + Tailwind CSS + daisyUI
 ```
 
 关键点：
 
-- **无数据库**：`settings.py` 中 `DATABASES` 被注释，所有内容来自爬虫实时抓取 + 缓存。
+- **两层缓存**：除搜索、歌手列表外的页面走「爬虫抓取 + 文件缓存」（默认 2 小时）；
+  搜索页走「本地曲库」（SQLite），同一个关键词只在第一次和超过保鲜期后才回源站；
+  首页歌手墙、歌手大全与「已同步歌手的详情页第 1 页」走本地库（SQLite），**一次源站都不请求**；
+  首页「今日热听榜」走「每日播放榜」（SQLite），同样是实时查库；首页「随机点唱机」在本地
+  曲目库里随机抽（整批缓存在文件缓存里，见 8.11）—— 至此**首页整页不回源**。
+  都为了同一个目的：**尽量少打扰源站，别被 2t58 封 IP**。详见第八章。
+- **数据库**：SQLite 存曲库三张表（`Song` / `SearchKeyword` / `SearchResult`）、
+  歌手名册一张表（`Singer`）、歌手曲目一张表（`SingerSong`）与每日播放次数一张表（`SongPlay`），
+  其余页面一条数据都不落库。已开启 **WAL**（预写日志）并把写锁等待放宽到 20 秒，
+  多个访客同时搜索时读与写不再互相卡住（默认的 rollback journal 模式下，
+  一次写会把整个库的读锁住，很容易冒 `database is locked` 并误发换库告警）。
+  出现持续的写锁冲突时，`Web/services/db_alert.py`
+  会发邮件提醒换库（邮件里带换库步骤与现场信息）。
 - **人机验证**：源站（2t58.com）有"安全人机验证"，需在 `.env` 配置有效的
   `MUSIC_2T58_PHPSESSID`（浏览器手动通过验证后从 Cookie 复制，过期需更新）。
 - **播放链接解密**：源站播放链接是 AES-ECB 加密的，爬虫内置解密逻辑，前端不参与。
@@ -46,26 +76,47 @@ Django（6.1）
 ## 三、目录结构
 
 ```
-BeiZiMusic/
-├── BeiZiMusic/                  # Django 项目配置
-│   ├── settings.py              # 全局配置（含缓存配置 CACHES）
+BeiZiMusic/                      ← 外层：项目根目录（名字随意，不影响运行）
+├── XiaoYingMusic/               # Django 配置包（settings/urls/wsgi/asgi）
+│   ├── settings.py              # 全局配置（缓存、曲库、热门搜索、节日主题等）
 │   └── urls.py                  # 根路由
 ├── Web/
+│   ├── models.py                # 曲库三张表 Song / SearchKeyword / SearchResult（+ 歌手名册表 Singer、歌手曲目表 SingerSong）
+│   ├── migrations/              # 建表迁移（已入库，clone 后直接 migrate 即可）
+│   ├── management/commands/
+│   │   ├── sync_singers.py      # 歌手名册同步：爬列表 → 下载封面 → 传小影图床 → 入库（见 8.8）
+│   │   └── sync_singer_songs.py # 歌手曲目同步：逐位抓第 1 页曲目 → 入库（见 8.10）
 │   ├── views/
 │   │   ├── request.py           # 全部页面/接口视图（含下载代理、sitemap）
 │   │   └── urls.py              # 前端路由
-│   ├── templates/               # 页面模板（index/song/singer/...）
-│   ├── static/                  # 静态资源（css/js/images/layui）
-│   └── services/friend_links.py # 小影 API 友情链接（1 小时缓存）
+│   ├── templates/               # 页面模板（index/song/singer/search/...）
+│   │   └── common_html/         # 公共片段（header/footer/搜索框/分页器/节日横幅）
+│   ├── static/                  # 对外服务的静态资源（output.css / js / images）
+│   ├── static-src/css/          # 静态资源的**源文件**（input.css、daisyui 主题脚本、tailwindcss.exe）
+│   │                            # 刻意不放在 static/ 下：那是公网可访问的目录，放进去等于把编译器和 CSS 源码一起暴露
+│   ├── data/                    # 节日与祝福语数据（holidays.py / holiday_greetings.json）
+│   └── services/
+│       ├── music_library.py     # 曲库：搜索结果取用、翻页补货、搜索计数
+│       ├── singer_library.py    # 歌手库：首页歌手墙与随机点唱机、歌手大全、歌手页第 1 页的取数与分页（见 8.8 / 8.10 / 8.11）
+│       ├── play_rank.py         # 每日播放榜：整首播完计数 + 首页「今日热听榜」取前几（见 8.9）
+│       ├── pager.py             # 列表页共用的分页链接生成（搜索页 / 歌手大全）
+│       ├── hot_search.py        # 热门搜索榜（header 下拉的数据源）
+│       ├── db_alert.py          # 换库告警邮件
+│       ├── xiaoying_api.py      # 小影 API 签名客户端（发信/友情链接共用）
+│       ├── friend_links.py      # 友情链接（1 小时缓存）
+│       ├── holiday.py           # 节日 → 主题解析
+│       └── site_info.py         # 站点名称/联系方式/静态资源版本号注入
 ├── SpiderServices/Music_2t58/
-│   └── main.py                  # 2t58.com 爬虫（12 个 fetch_xxx 方法，全部带缓存）
-├── middlewares/
-│   └── request_detect.py        # 请求身份识别中间件（默认关闭）
-├── cache/                       # 爬虫缓存文件（运行时自动生成，已 gitignore）
+│   └── main.py                  # 2t58.com 爬虫（除搜索、歌手列表外，各 fetch_xxx 带页面缓存）
+├── cache/                       # 页面缓存文件（运行时自动生成，已 gitignore）
 ├── media/                       # 图标等媒体文件
+├── docs/screenshots/            # 本文档的界面截图（见开头「界面预览」）
+├── deploy/seed_db.sqlite3       # 部署用的数据库种子快照（**入库**，见第十三章）
+├── uwsgi.ini                    # uWSGI 配置（服务器部署用，见第十三章）
+├── db.sqlite3                   # 曲库数据库（运行时自动生成，已 gitignore）
 ├── .env                         # 环境变量配置（数据库/爬虫/缓存等，已 gitignore）
 ├── manage.py
-└── requirements.txt
+└── requirements.txt             # 依赖（版本已锁死，需要 Python 3.12+）
 ```
 
 ## 四、快速开始
@@ -74,10 +125,12 @@ BeiZiMusic/
 # 1. 创建虚拟环境（Windows）
 python -m venv .venv
 
-# 2. 安装依赖
+# 2. 安装依赖（版本已锁死；需要 Python 3.12+）
 .venv\Scripts\pip install -r requirements.txt
 
 # 3. 配置 .env（参考第五节；没有 .env 时程序用默认值运行，但爬虫需要 PHPSESSID）
+#    为了省掉几小时的爬取，把仓库里的种子库拷成正式库：
+#      copy deploy\seed_db.sqlite3 db.sqlite3
 
 # 4. 启动服务
 .venv\Scripts\python manage.py runserver 127.0.0.1:8000
@@ -85,9 +138,15 @@ python -m venv .venv
 
 浏览器访问 <http://127.0.0.1:8000> 即可。
 
+- **不拷种子库也能跑起来**：先跑一次 `python manage.py migrate` 建表即可，
+  只是本地库是空的 —— 首页的歌手墙与随机点唱机会是空态、歌手大全是 0 位，
+  搜索/榜单/歌手详情这些要回源站的页面也得先配好 `.env` 的 `MUSIC_2T58_PHPSESSID`（见 7.1）。
+  所以想"开箱就是完整数据"，就把种子库拷过去。
+- **部署到服务器**（宝塔 + Nginx + uWSGI）：见第十三章，那里有一份能照抄的完整流程。
+
 ## 五、环境变量配置（.env）
 
-在项目根目录创建 `.env` 文件（已 gitignore，不会提交），内容如下：
+把项目根目录的 **`.env.example` 复制为 `.env`** 后按需修改（`.env` 已 gitignore，不会提交）。
 
 ```ini
 # ---- Django 核心 ----
@@ -95,16 +154,47 @@ SECRET_KEY=django-insecure-xxx
 DEBUG=False
 ALLOWED_HOSTS=127.0.0.1
 CORS_ORIGIN_ALLOW_ALL=True
+# 站点在 HTTPS 反向代理后面时设为 True（否则 canonical/sitemap 会输出 http 地址）
+USE_X_FORWARDED_PROTO=False
+
+# ---- 站点品牌（二开改名只需改这里，见第十二节）----
+SITE_NAME=小影音乐网
+SITE_NAME_ALT=热门音乐
+# SITE_BRAND=                # 可选：SEO 描述里的品牌组合短语，不填自动拼「副名（主名）」
+
+# ---- 联系方式 / 统计 ----
+SITE_CONTACT_EMAIL=3766849790#qq.com
+SITE_CONTACT_WECHAT=duyanbz
+SITE_CONTACT_TG=xiaoying1216
+ANALYTICS_ID=3QisJxfuIZ0dJgUf    # 51.la 统计 ID，留空则不输出统计脚本
 
 # ---- 2t58 爬虫：人机验证通过后的 PHPSESSID（浏览器获取，过期需更新）----
 MUSIC_2T58_PHPSESSID=你的PHPSESSID
 
 # ---- 小影 API 基础地址（友情链接数据源）----
 XIAOYING_API_BASE=http://127.0.0.1:8002
+# ---- 小影 API 签名凭证（接口要求 app_id/timestamp/nonce/sign，缺一返回 20011）----
+XIAOYING_APP_ID=你的APPID
+XIAOYING_APP_SECRET=你的密钥
 
 # ---- 爬虫缓存（见下文「缓存机制」，全部可选，有默认值）----
 CACHE_TTL_HOURS=2
 CACHE_TTL_PLAY_MINUTES=30
+
+# ---- 曲库：搜索结果本地化（减少回源站次数，见 8.6）----
+SEARCH_KEYWORD_MAX_CHARS=15
+SEARCH_KEYWORD_TTL_HOURS=12
+SEARCH_BLOCKED_TTL_HOURS=168
+SEARCH_REFILL_MAX_PAGES=3
+
+# ---- 热门搜索榜（header 搜索框的下拉，见 8.7）----
+HOT_SEARCH_COUNT=7
+HOT_SEARCH_DAYS=30
+HOT_SEARCH_DEDUP_MINUTES=5
+HOT_SEARCH_CACHE_MINUTES=10
+
+# ---- 换库告警邮件冷却时长（小时）----
+DB_ALERT_COOLDOWN_HOURS=24
 ```
 
 | 变量 | 说明 | 默认值 |
@@ -113,29 +203,64 @@ CACHE_TTL_PLAY_MINUTES=30
 | `DEBUG` | 调试模式（`True` 显示详细报错） | `False` |
 | `ALLOWED_HOSTS` | 允许访问的域名，逗号分隔 | `*` |
 | `CORS_ORIGIN_ALLOW_ALL` | 是否允许跨域 | `False` |
+| `USE_X_FORWARDED_PROTO` | 站点在 HTTPS 反向代理后时设为 `True`，否则 canonical/sitemap 会输出 http 地址 | `False` |
+| `SITE_NAME` | **站点主名称**（logo/SEO 标题/结构化数据全站统一） | `小影音乐网` |
+| `SITE_NAME_ALT` | **站点副名称**（SEO 文案中并列出现，留空则只用主名） | `热门音乐` |
+| `SITE_BRAND` | SEO 描述里的品牌组合短语（不填自动拼「副名（主名）」） | 自动拼接 |
+| `SITE_CONTACT_EMAIL` | 联系邮箱（页脚「联系我们」弹窗 + 侵权处理声明） | `3766849790#qq.com` |
+| `SITE_CONTACT_WECHAT` | 微信号（页脚「联系我们」弹窗） | `duyanbz` |
+| `SITE_CONTACT_TG` | Telegram（页脚「联系我们」弹窗） | `xiaoying1216` |
+| `ANALYTICS_ID` | 51.la 统计 ID，**留空则不输出统计脚本** | 作者的 ID |
 | `MUSIC_2T58_PHPSESSID` | 源站人机验证凭证，**必填**，过期需更新 | 空 |
 | `XIAOYING_API_BASE` | 小影 API 地址（友情链接） | `https://xiaoyingapi.com` |
+| `XIAOYING_APP_ID` | 小影 API 接入项目 APPID（签名用） | 空 |
+| `XIAOYING_APP_SECRET` | 小影 API 签名密钥（**敏感**，仅存 .env，不入库） | 空 |
 | `CACHE_TTL_HOURS` | 全局缓存时长（小时） | `2` |
-| `CACHE_TTL_PLAY_MINUTES` | 播放直链/MV 详情短缓存（分钟） | `30` |
-| `CACHE_TTL_HOURS_<类型>` | 按页面类型覆盖缓存时长（小时） | 不配用全局 |
+| `CACHE_TTL_PLAY_MINUTES` | 播放直链短缓存（分钟） | `30` |
+| `CACHE_TTL_HOURS_<类型>` | 按页面类型覆盖缓存时长（小时）。**搜索结果不在其中**（走曲库） | 不配用全局 |
+| `SEARCH_KEYWORD_MAX_CHARS` | 搜索关键词最大长度（字符）。搜索框 `maxlength` 与后端截断共用同一个值 | `15` |
+| `SEARCH_KEYWORD_TTL_HOURS` | 关键词保鲜时长（小时），过期后下次搜索同步重爬 | `12` |
+| `SEARCH_BLOCKED_TTL_HOURS` | 被屏蔽关键词的保鲜时长（小时），屏蔽不会自愈所以拉长 | `168` |
+| `SEARCH_REFILL_MAX_PAGES` | 单次请求最多回源几页；分页器页码增量也是它 | `3` |
+| `HOT_SEARCH_COUNT` | 热门搜索榜显示几个词 | `7` |
+| `HOT_SEARCH_DAYS` | 热门榜只统计最近多少天内被搜过的词 | `30` |
+| `HOT_SEARCH_DEDUP_MINUTES` | 同一 IP 对同一个词多少分钟内重复搜只算一次 | `5` |
+| `HOT_SEARCH_CACHE_MINUTES` | 热门榜结果缓存时长（分钟） | `10` |
+| `PLAY_RANK_COUNT` | 首页「今日热听榜」显示几首（每日播放榜） | `10` |
+| `PLAY_DEDUP_MINUTES` | 同一 IP 对同一首歌多少分钟内重复听完只算一次 | `10` |
+| `RANDOM_PICK_COUNT` | 首页「随机点唱机」显示几首（本地曲目库随机抽取） | `18` |
+| `DB_ALERT_COOLDOWN_HOURS` | 换库告警邮件冷却时长（小时） | `24` |
+
+> 「随机点唱机」换批快慢**没有单独配置项**：它复用 `CACHE_TTL_HOURS_HOME`（缺省用全局
+> `CACHE_TTL_HOURS`），跟首页数据共用一个时长，见 8.11。
 
 ## 六、页面路由一览
 
 | 路由 | 页面 | 对应爬虫方法 |
 |---|---|---|
-| `/` | 首页 | `fetch_home` |
+| `/` | 首页（三块数据全读本地库，不经过页面缓存，见 8.11） | 歌手库 `home_singers` / 曲目库 `random_songs` / 播放榜 `today_top` |
 | `/singer/<sid>.html` | 歌手详情 | `fetch_singer` |
-| `/singerlist/<area>/<gender>/<style>/<letter>.html` | 歌手列表 | `fetch_singer_list` |
-| `/song/<sid>.html` | 歌曲详情 | `fetch_song` |
-| `/api/song/<sid>.json` | 播放条切歌 JSON | `fetch_song` |
-| `/so/<keyword>.html` | 搜索 | `fetch_search` |
+| `/singerlist/<area>/<gender>/<style>/<letter>.html` | 歌手大全（走本地歌手库，不经过页面缓存） | 歌手库 `page_singers` |
+| `/song/<sid>.html` | 歌曲详情（含页面内播放器） | `fetch_song` |
+| `/so/<keyword>.html` | 搜索（走本地曲库，不经过页面缓存） | 曲库 `search_page` → `_do_fetch_search` |
 | `/list/<chart>.html` | 榜单 | `fetch_chart` |
-| `/playtype/<playtype>.html` | 歌单列表 | `fetch_playtype_list` |
-| `/playlist/<sid>.html` | 歌单详情 | `fetch_playlist` |
-| `/mvlist/<mvtype>.html` | MV 列表 | `fetch_mvlist` |
-| `/video/<sid>.html` | MV 详情 | `fetch_video` |
-| `/download/<sid>/mp3.html` | 下载 MP3（`lrc`=歌词，`all`=打包ZIP） | `fetch_download` |
-| `/sitemap.xml` | 站点地图（缓存 6 小时） | — |
+| `/download/<sid>/mp3.html` | ~~下载 MP3（`lrc`=歌词，`all`=打包ZIP）~~ **暂时关闭：一律返回 404** | `fetch_download`（代码保留未动） |
+| `/api/play/ended` | 播放页整首播完的计数回调（**只接受 POST**，非页面） | — |
+| `/sitemap.xml` | 站点地图（缓存 6 小时） | 歌手库 + `fetch_home`（只借它取歌曲链接，见 8.11） |
+
+翻页统一是在原地址后加 `/<页码>`，例如 `/singer/<sid>/2.html`、`/so/<keyword>/2.html`。
+
+> 搜索路由有三条：`/so/<关键词>.html`（第 1 页）、`/so/<关键词>/<页码>.html`（翻页），
+> 外加一条**正则兜底**。前两条用的是 `<str:keyword>`，它不匹配斜杠；而 WSGI 会把
+> 地址里的 `%2F` 先解码成 `/`，所以搜 "AC/DC" 这类带斜杠的关键词会连路由都进不去（404）。
+> 兜底路由 `^so/(.+?)(?:/(\d+))?\.html$` 专门接住这种关键词，末尾的页码组是可选的，
+> 保证带斜杠的关键词也能翻页。
+
+> 歌手大全的 URL 结构原样保留（`/singerlist/<地区>/<性别>/<类型>/<字母>.html`），但这四个维度
+> **不再是筛选条件**：库里没有分类数据，源站也不提供。只有四个都是 `index` 的地址才是
+> "全部歌手"页，其余组合一律 **301** 跳到对应的全量页（页码保留，如
+> `/singerlist/huayu/index/index/index/5.html` → `/singerlist/index/index/index/index/5.html`）
+> —— 不收敛的话，同一个列表会在几千个不同 URL 上重复出现，搜索引擎会当成重复内容。详见 8.8。
 
 ## 七、爬虫说明
 
@@ -164,6 +289,17 @@ CACHE_TTL_PLAY_MINUTES=30
 - 页面编码自动检测，避免中文乱码；
 - 下载代理转发时**不带 Referer**，绕过 CDN 防盗链 403。
 
+### 7.4 重要：源站域名必须带 www（踩坑点）
+
+源站 `https://2t58.com/`（不带 www）会 **302 跳转**到 `https://www.2t58.com/`。
+
+而人机验证需要用 **POST** 提交表单（`csrf_token` + `human_check`），
+POST 遇到 302 跳转时 requests 会自动把请求**降级为 GET 并丢弃表单数据**，
+结果就是**人机验证永远无法通过 → 所有页面抓不到数据（全站空白）**。
+
+因此 `HOME_URL`、`HEADERS['Referer']`、`PLAY_API` 三处**必须使用带 www 的域名**
+`https://www.2t58.com/`，否则会出现"页面没数据但又查不出原因"的问题。
+
 ---
 
 ## 八、缓存机制（重要，详细说明）
@@ -172,23 +308,32 @@ CACHE_TTL_PLAY_MINUTES=30
 > 如果不缓存，每来一个访客就请求一次源站，会把源站压垮，也可能触发反爬封 IP。
 > 加缓存后，**同一个页面在缓存有效期内，只会访问源站一次**，其余全部命中本地缓存。
 
+本站有**两层互相独立的缓存**，别混在一起看：
+
+| 层 | 存哪 | 覆盖范围 | 失效方式 |
+|---|---|---|---|
+| ① 页面文件缓存 | `cache/` 目录（文件） | 仍需回源抓的页面（歌手页第 2 页起、歌曲页、榜单页、尚未同步曲目的歌手页…） | 到点即失效，下次访问整页重抓 |
+| ② 本地库 | `db.sqlite3`（数据库） | 首页（三块全是，见 8.11）、搜索页、歌手大全、**已同步歌手详情页的第 1 页**、header 热门搜索榜 | 持久保存，各有各的保鲜/同步策略 |
+
+8.1–8.5 讲第一层；**8.6 起讲第二层**：8.6 搜索曲库、8.7 热门搜索榜、8.8 歌手名册、
+8.9 每日播放榜、8.10 歌手曲目库、8.11 首页随机点唱机。
+
 ### 8.1 缓存了什么
 
-爬虫 `main.py` 中 **12 个 `fetch_xxx` 方法的返回结果全部被缓存**（除了下载专用方法）：
+爬虫 `main.py` 中带缓存的 `fetch_xxx` 方法，返回结果都会写入缓存：
 
 | 缓存键前缀 | 对应方法 | 默认时长 |
 |---|---|---|
-| `2t58_home` | 首页三大板块 | 2 小时 |
-| `2t58_singer_*` | 歌手详情 | 2 小时 |
+| `2t58_home` | 首页数据（首页自己不用了，只剩 sitemap 借它取歌曲链接，见 8.11） | 2 小时 |
+| `2t58_singer_*` | 歌手详情（还没同步曲目的歌手，以及所有歌手的第 2 页起，见 8.10） | 2 小时 |
 | `2t58_song_*` | 歌曲信息 + 歌词 + 每日推荐 | 2 小时 |
 | `2t58_song_play_*` | 歌曲播放直链 | **30 分钟** |
-| `2t58_search_*` | 搜索结果 | 2 小时 |
 | `2t58_chart_*` | 榜单页 | 2 小时 |
-| `2t58_singer_list_*` | 歌手列表 | 2 小时 |
-| `2t58_playtype_*` | 歌单列表 | 2 小时 |
-| `2t58_playlist_*` | 歌单详情 | 2 小时 |
-| `2t58_mvlist_*` | MV 列表 | 2 小时 |
-| `2t58_video_*` | MV 详情（含 CDN 直链） | **30 分钟** |
+| ~~`2t58_singer_list_*`~~ | 歌手列表 | 已移除：歌手大全改读本地歌手库，见 8.8 |
+
+**搜索结果不在这张表里**：它由本地曲库负责缓存，`_do_fetch_search` 刻意不带页面缓存，
+避免两层缓存叠加。曲库的实现见 `Web/services/music_library.py` 与 `Web/models.py`。
+**歌手列表同理**：它现在连爬虫都不经过，只查本地歌手库（见 8.8）。
 
 **不缓存**：`fetch_download`（下载必须拿到最新直链，否则链接可能已过期）。
 
@@ -202,12 +347,12 @@ CACHE_TTL_PLAY_MINUTES=30
 支持的类型（对应 `CACHE_TTL_HOURS_` 后缀）：
 
 ```
-HOME       首页            SINGER     歌手详情
-SONG       歌曲信息/歌词    SEARCH     搜索结果
-CHART      榜单页          SINGER_LIST 歌手列表
-PLAYTYPE   歌单列表        PLAYLIST   歌单详情
-MVLIST     MV 列表
+HOME       首页数据（现只给 sitemap）+ 随机点唱机换批    SINGER     歌手详情
+SONG       歌曲信息/歌词                                CHART      榜单页
 ```
+
+（搜索结果不在其中：它由本地曲库统一缓存，不经过页面缓存。歌手列表也不在其中：
+它已改读本地歌手库，爬虫侧那个带缓存的抓取方法已随之删除，见 8.8。）
 
 **示例**：把榜单页改成 1 小时、歌曲页改成 3 小时，其余保持全局 2 小时：
 
@@ -219,7 +364,7 @@ CACHE_TTL_HOURS_SONG=3
 
 **播放直链单独短缓存**：`CACHE_TTL_PLAY_MINUTES=30`（单位：分钟）。
 CDN 播放直链是有时效的，缓存太久会导致"链接过期播放失败"，
-所以歌曲播放直链、MV 详情（内含视频直链）单独用短缓存，默认 30 分钟。
+所以歌曲播放直链单独用短缓存，默认 30 分钟。
 
 ### 8.3 缓存存哪里、怎么工作
 
@@ -230,6 +375,13 @@ CDN 播放直链是有时效的，缓存太久会导致"链接过期播放失败
 - **缓存键规范**：`<站点缩写>_<功能>_<参数>`，如 `2t58_home`、`2t58_singer_d2t3eA_1`；
   参数含特殊字符（中文/空格等）时自动取 md5，避免文件名异常。
 - **失效机制**：文件带有效期（TTL），到期后自动失效，下次访问自动重新抓取。
+- **容量上限**：`settings.CACHES` 里配了 `MAX_ENTRIES=20000`、`CULL_FREQUENCY=4`。
+  Django 的 FileBasedCache 默认上限只有 **300 个文件**，写第 301 个键时会**随机删掉约 1/3**——
+  本站有成百上千个页面，用默认值会让缓存互相挤掉、命中率塌陷、回源次数暴涨，
+  连换库告警的冷却键也会被随机淘汰。所以必须显式调大。
+- **空数据不缓存**：抓取失败（人机验证未通过、解析不到内容）时结果是空的，
+  这种空结果**不会写入缓存**，下次访问会重新抓取。好处是源站恢复后页面立即恢复，
+  不会出现"抓取失败一次 = 页面空 2 小时"的情况。
 - **独立脚本兼容**：爬虫通过 `_CacheAdapter` 访问缓存——在 Django 环境里用文件缓存；
   脱离 Django 独立跑脚本时自动退化为进程内内存缓存，不会报错。
 
@@ -246,7 +398,9 @@ python -c "import shutil; shutil.rmtree('cache')"
 
 ### 8.5 实现位置（给开发者）
 
-- 缓存配置：[BeiZiMusic/settings.py](BeiZiMusic/settings.py)（`CACHES` + `CACHE_TTL_HOURS`）
+- 缓存配置：[XiaoYingMusic/settings.py](XiaoYingMusic/settings.py)（`CACHES` 的 `LOCATION` 与容量上限）
+- 缓存时长：`CACHE_TTL_HOURS` 等**不在 settings.py 里**，由爬虫自己读 `.env`
+  （见 `SpiderServices/Music_2t58/main.py` 顶部）—— 时长只在爬虫层用得到，放两处反而容易改漏。
 - 缓存逻辑：[SpiderServices/Music_2t58/main.py](SpiderServices/Music_2t58/main.py)：
   - `_CacheAdapter`：统一缓存入口（django cache 优先，内存兜底）
   - `_ttl_for(类型)`：按类型取时长（支持 .env 覆盖）
@@ -255,29 +409,925 @@ python -c "import shutil; shutil.rmtree('cache')"
   - `_cached(key, 抓取函数, 时长)`：所有 `fetch_xxx` 的统一封装
 - sitemap 缓存：`Web/views/request.py`（`sitemap_urls`，固定 6 小时）
 
+### 8.6 本地曲库（搜索结果专用）
+
+**为什么单独做一层**：搜索页原本也是"实时抓源站 + 文件缓存"，但搜索结果有三个特殊之处——
+关键词无穷多（每个都存一份缓存文件会撑爆 `cache/`）、同一批歌会被很多关键词重复搜到、
+源站对搜索接口的频率限制更严。所以搜索改成**落库**。
+
+**三张表**（`Web/models.py`）：
+
+| 表 | 一行是什么 | 关键字段 |
+|---|---|---|
+| `Song` | 一首歌，`sid` 唯一，多个关键词共用一行 | `sid` / `name` / `singers` / `pulled_at` |
+| `SearchKeyword` | 一个搜索词：抓到第几页 + 被搜了多少次 | `crawled_pages` / `total_pages` / `total_results` / `source_empty` / `blocked` / `search_count` |
+| `SearchResult` | "某关键词的源站第 N 页第 M 位是哪首歌" | `keyword` / `song` / `source_page` / `position` |
+
+**为什么不靠"歌名/歌手含关键词"去猜**：源站的搜索行为不可控。实测——搜歌手名能搜到
+（陈奕迅、林俊杰、张学友都正常），但**「周杰伦」被单独屏蔽**、返回空；搜「音乐」
+又返回 68 条、里面一条都不含"音乐"。靠猜得到的集合既不全也不准，所以只认一件事：
+**源站对这个关键词实际返回过什么，原样记下来**。
+
+**页码与源站一一对应**：展示页 = 源站页（2t58 是一页 68 条），取第 P 页就是
+"筛出 `source_page == P` 的行"。这样页码不会错位，也不用维护
+"本地一页 20 条 vs 源站一页 68 条"的换算。
+
+**一次搜索经过两道闸门**（实现见 `Web/services/music_library.py`）：
+
+| 闸门 | 触发条件 | 动作 | 代价 |
+|---|---|---|---|
+| 1 过期刷新 | 距上次抓取超过 `SEARCH_KEYWORD_TTL_HOURS` | 重爬第 1 页 + 已爬到的那一页 | 回源 1~2 页 |
+| 2 翻页补货 | 这一页还没爬到 | 从水位线往后爬，直到爬到这一页 | 回源 1~3 页 |
+| — 直接返回 | 上面两条都不成立 | 从库里取出这一页 | **0 请求** |
+
+每次请求的回源总量受 `SEARCH_REFILL_MAX_PAGES` 限制（刷新与补货共用额度），
+分页器的页码上限也是"已爬 + 这个数"，所以**每个能点开的页码都真有内容**。
+
+**几个实测数字**（2026-09 实测源站）：
+
+| 关键词 | 源站报的总数 | 真实末页 | 第一次搜索 | 第二次搜索 |
+|---|---|---|---|---|
+| 粤语残片 | 190 条 | 3 页 | 约 1 秒（回源 1 页） | 0.01 秒，0 请求 |
+| 陈奕迅 | 3600 条 | 53 页 | 约 1 秒（回源 1 页） | 0.01 秒，0 请求 |
+| 周杰伦 | 0（被屏蔽） | — | 约 0.6 秒（去验一次） | 0.03 秒，0 请求 |
+
+**结果总数**直接取源站自己写的「共有 N 首搜索结果」（`div.pagedata`），
+不要拿"页数 × 每页条数"估——末页通常不满，估出来会偏大（陈奕迅 53 页估 3604，实际 3600）。
+
+**被屏蔽的词**：源站对这类词不给结果页，只回一个约 1KB 的提示页（正常结果页约 27KB）。
+爬虫据此识别并单独记 `blocked`，页面提示「根据反馈，该关键词已做屏蔽处理」；
+保鲜期改用 `SEARCH_BLOCKED_TTL_HOURS`（默认 7 天）——屏蔽不会自愈，反复试只是白跑。
+
+**其它保护**：同一关键词并发时只让一个请求去爬（双检锁）；查不到的词打负缓存，
+保鲜期内一次都不爬；写库失败只记日志（若是写锁冲突则发换库告警邮件），
+**绝不让搜索页因为存不下来而报错**。另外，**落库失败时水位线不会推进**——
+否则下次请求会以为这页已经爬过、直接切页返回，用户看到一片空白，而这一页的数据其实从没写进去。
+
+**关键词长度**：入库前按 `SEARCH_KEYWORD_MAX_CHARS`（默认 15 字符）截断。搜索框的
+`maxlength` 与后端截断共用 `.env` 里的同一个值 —— 前端只拦得住正常打字，手敲超长 URL
+依然能进来，所以后端要用同一个值再截一次，否则两边行为不一致。
+另外还会兜一道数据库上限（字段 `max_length=255`）：SQLite 不校验长度会照单全收，
+但换成 MySQL / PostgreSQL 后超长会直接抛错，把搜索页打成 500。
+
+**清库**：想重来一遍就直接删掉 `db.sqlite3`，再跑 `python manage.py migrate` 即可
+（里面全是缓存数据，删了不影响任何页面）。
+
+### 8.7 热门搜索榜（header 搜索框的下拉）
+
+数据来源就是 `SearchKeyword` 自己：每被搜一次 `search_count` 加一。
+
+- **什么时候算一次**：只算"搜某个词的第 1 页"，翻到第 2、3 页不算；同一个 IP 对同一个词
+  在 `HOT_SEARCH_DEDUP_MINUTES` 分钟内重复搜只算一次（防刷）。防刷状态记在
+  `SearchKeyword` 的 `last_hit_ip` / `last_hit_at` 两个字段上，**不写缓存键**：
+  缓存键里带 IP 的话，伪造 `X-Forwarded-For` 就能一个请求撑出一个缓存文件，
+  攒够几万个就把 `cache/` 目录塞爆。
+- **哪些词能上榜**：最近 `HOT_SEARCH_DAYS` 天内被搜过、且**真的有内容**的词，
+  按累计次数倒序取 `HOT_SEARCH_COUNT` 个（默认 7）。被屏蔽的、查不到的词不上榜
+  ——点进去是死路，摆在榜上等于给用户挖坑。
+- **放在哪**：header 的两个搜索框（桌面端 + 窄屏端）。输入框获得焦点时用**纯 CSS** 的
+  `max-height` / `opacity` 过渡缓缓展开，不需要 JS，也不会和"点空白处收起弹层"的逻辑打架。
+- **为什么还要缓存**：它在**每个页面**的 header 里都要用，不能让每次浏览都查一次库，
+  所以榜单结果缓存 `HOT_SEARCH_CACHE_MINUTES` 分钟；某个词**第一次**被搜到时会立刻清掉
+  这个缓存，让新词马上上墙。
+- **实现位置**：榜单查询与缓存 `Web/services/hot_search.py`（上下文处理器注入
+  `HOT_KEYWORDS`）；下拉结构 `Web/templates/common_html/search_box.html`。
+
+> 注意：搜索框上加了 `autocomplete="off"`，是为了关掉浏览器自带的"以前搜过什么"历史下拉，
+> 否则它会盖住我们的热门搜索下拉。
+
+### 8.8 本地歌手库（首页歌手墙 + 歌手大全）
+
+**为什么不回源**：歌手名册是"变化极慢、体量很小"的数据，却要在首页和歌手大全被反复读到。
+原来每次都要抓列表页，白白消耗源站的请求配额。所以把整份名册**一次性落库**，
+这两个页面直接查库：**0 请求、0 缓存文件**。
+（歌手**详情页**仍然走爬虫 `fetch_singer`——那里要的是该歌手的歌曲列表，库里没有。）
+
+**一张表**（`Web/models.py` 的 `Singer`）：
+
+| 字段 | 说明 |
+|---|---|
+| `sid` | 源站的歌手 id（唯一），详情页地址就是 `/singer/<sid>.html` |
+| `name` | 歌手名 |
+| `source_pic` | 源站列表页里那张头像的地址（gimg3.baidu.com 中转的 kuwo 头像） |
+| `cover` | 下载后上传到小影图床（PicUI 线路）得到的外链，**页面展示用这个** |
+| `pulled_at` | 最近同步时间 |
+
+封面存两份地址，各有各的用处：`cover` 是图床外链，页面优先用它；还没传上去的自动回落到
+`source_pic`（模板统一读 `Singer.pic` 这个 property）。这样两万多张不必全传完就能切数据源，
+页面也不会出现"一半有图一半空白"。留 `source_pic` 还为了以后想换图床、或图床图丢了时，
+不用重爬 247 页列表就能重传。
+
+**怎么同步**（`Web/management/commands/sync_singers.py`）：
+
+```bash
+python manage.py sync_singers                 # 全量（爬名册 + 逐张传封面）
+python manage.py sync_singers --skip-upload   # 只入库名册，不动图床
+python manage.py sync_singers --pages 3       # 只爬前 3 页列表（试跑）
+python manage.py sync_singers --limit 10      # 封面只传 10 位（试跑）
+python manage.py sync_singers --refresh       # 已有外链的也重新下载上传
+```
+
+分两个阶段：**阶段一** 爬完列表页，先把 `sid / name / source_pic` 落库；
+**阶段二** 逐张下载封面 → 传小影图床 → 回填 `cover`。分开的好处是阶段二中途挂了，
+名册本身是完整的，重跑只补还没封面的那些。全程按 `sid` 幂等，中断后直接再跑一次就续上。
+
+**封面逐张串行上传**：图床一次只能安稳处理一张。实测开并发（6~8 个线程）后本地 API
+大量 60 秒读超时、整批进度卡死，吞吐反而掉到十分之一都不到，还白耗图床容量。
+所以刻意串行（约 0.5 张/秒），**不要为了"提速"改回并发**。
+
+**图床只返回外链、不替我们保存任何映射**：`cover` 这一列是外链的唯一记录，所以传成功必须
+立刻写库；写库万一失败，命令会把外链打到 stderr，至少还能人工捞回来。
+
+**实测数字**（2026-09）：源站页面写 23631 位 / 247 页（每页 96 条，末页 15 条），
+按 `sid` 去重后实际入库 **23435 位**（差 196 是同一歌手跨页重复）。
+末页页码从分页区"尾页"链接的 `href` 里读，不写死——源站加人减人都不用改代码。
+
+**为什么没有分类筛选**：库里没有地区/性别/类型字段，源站也不提供结构化分类数据
+（实测歌手列表页每条只有"图 + 名字"；歌手详情页只有"名字 + 头像 + 一段简介正文"，
+`地区` / `性别` / `类型` 出现次数均为 0）。做不了真的筛选，就只做全量分页
+（每页 96 位，与源站对齐），带分类参数的旧地址一律 301 收敛，见第六节。
+
+**首页取哪 24 位**：按入库顺序取前 24（`order_by('id')`），即源站列表的默认顺序
+（半吨兄弟、汪苏泷、S.H.E、周深、林俊杰、陈奕迅……）。库里没有"热门"这个维度，
+所以不另外排序——固定不变，对页面缓存和 SEO 都更稳；首页那块标题也因此叫
+**「歌手推荐」**而不是「热门歌手」，避免标题承诺了数据里没有的东西。
+（首页三个子模块的数据源现在各不相同，且**全部来自本地库**：歌手推荐 → 本地歌手库、
+今日热听榜 → 每日播放榜、随机点唱机 → 本地曲目库。所以首页已经完全不经过爬虫了，见 8.11。）
+
+**越界页码返回 404**：页码超过总页数（如只有 245 页却请求第 300 页）直接 404，
+不再返回"200 的空页面"——否则任意页码都能访问，搜索引擎能收录出无穷多个重复空壳页。
+
+**sitemap 也读本地库**：首页那 24 位歌手页 + 歌手大全全部分页都由 sitemap 输出
+（见 `Web/views/request.py` 的 `sitemap`）。两万多位歌手的入口都在这些列表页里，
+不必把两万多条详情页全塞进 sitemap。
+
+**分页链接**：歌手大全与搜索页共用 `Web/services/pager.py`（页码窗口、省略号、上一页/下一页），
+各页只需传入"这一页的地址怎么拼"。
+
+### 8.9 每日播放榜（首页「今日热听榜」）
+
+**它答的是什么问题**：本站访客今天真正听完的是哪些歌。这个模块原名「破浪热曲」，
+数据取的是**源站**的「歌曲飙升榜」——那是别人家的榜，跟本站访客爱听什么没关系。现在换成自己的数据。
+
+名字现在叫**「今日热听榜」**（中间试过「今日回响」，因为语义不够直白被换掉）：
+「今日」限定时间范围、「热听」点明"被听得最多"、「榜」点明它是榜单 —— 三个信息都在名字里。
+没有播放数据时，这块显示音符图标（`fa fa-music fa-2x`）+ "暂无数据"。
+图标大小**必须用 FA 自带的大小类**（`fa-lg` / `fa-2x` / `fa-3x` / `fa-4x`），
+Tailwind 的 `text-3xl` 之类对图标无效 —— 原因见 FAQ。
+
+**计数只在"整首播完"时发生**：播放页的 `song_player.js` 监听 audio 的 `ended` 事件，
+播完才 `POST /api/play/ended`（带 `sid` / `name` / `artists`）。
+中途暂停、关页面、拖进度条走掉都不发请求，所以记的是**听完次数**，不是点开次数。
+上报失败一律被吞掉（连提示都不弹）：少一次计数是小事，让正在听歌的人看到报错才是大事。
+
+**一张表**（`Web/models.py` 的 `SongPlay`）：一行 = 一首歌 + 一天。
+
+| 字段 | 说明 |
+|---|---|
+| `sid` + `play_date` | 唯一键。`play_date` 是**北京日期**（`timezone.localdate()`），不是 UTC 日期 |
+| `name` / `artists` | 歌名与歌手，随播放页一起上来（后端没有这份数据，见下） |
+| `plays` | 当天听完的次数 |
+| `last_played_at` | 最近一次听完的时间，用于次数相同时的排序 |
+| `last_hit_ip` / `last_hit_at` | 防刷状态（沿用热门搜索榜的做法） |
+
+**为什么"每日 00:00 重新计算"不需要定时任务**：取榜就是一句
+`filter(play_date=今天)`，跨过零点后新的一天在库里本来就没有行，
+计数自然从 1 开始。往前的日期都留着，以后想做周榜/月榜不用改表结构。
+
+**为什么是实时榜单**：首页现在已经没有页面缓存了（三块数据都读本地库，见 8.11），
+取榜就是在每次请求里查一次 `SongPlay`（见 `Web/views/request.py` 的 `index`），
+所以零点一过，首页立刻就是新一天的数据。同页另外两块不这么敏感：歌手墙固定不变、
+随机点唱机按 `CACHE_TTL_HOURS_HOME` 整批缓存。
+
+**歌名为什么存在这张表里，而不去关联 `Song` 表**：本地 `Song` 表只沉淀"被搜索过"的歌，
+而播放页绝大多数是从歌手页/榜单点进来的，库里根本没有对应记录。
+所以标题跟着播放页一起落库；`sid` 格式（`^[A-Za-z0-9_-]{1,32}$`）与字段长度都在
+接口层卡住，`name` 为空时兜底用 `sid`，首页不会出现空白标题。
+
+**已有的防护**
+
+| 防护 | 说明 |
+|---|---|
+| 同 IP + 同一首 + `PLAY_DEDUP_MINUTES` 分钟内只算一次 | 一个人循环刷同一首，10 分钟内只记 1 次 |
+| 只接受 POST | 爬虫和预取不会误触发计数；GET 一律 405 |
+| `sid` 格式校验 | 非法 sid 直接 400，不会往表里塞任意字符串 |
+| 长度截断 | 歌名/歌手按字段上限截断，换成 MySQL/PostgreSQL 也不会因超长报错 |
+| 写库异常不影响播放页 | 写锁冲突只发换库告警 + 记日志（`play_rank._write`），不上抛 |
+| 次数并列时的确定顺序 | 次数 → 最近听完时间 → id，三级排序保证刷新两次顺序不变 |
+
+**这个榜单拦不住什么**（要知道）：接口是公开的，有人可以不用听、直接重复调它刷次数；
+上面 10 分钟的 IP 去重只挡住"低成本猛刷"。另外拖到结尾、以及"刷新后自动续播到最后"
+也会触发 `ended`，都会被计入——这类和"真的听完一遍"难以区分，按听完计也说得过去。
+
+**为什么决定不做更强的防刷**（评估后放弃，别再重复讨论）：关键是**服务端手里没有
+"这首歌被播了多久"的可信证据** —— 爬虫不解析歌曲时长（`fetch_song` 只有
+name/artists/cover/play_url/lyrics），而前端上报的任何秒数都可以伪造，只有服务端自己
+数的秒数才可信。可行的方案（播放开始打点 + 发牌 + 服务端计时 + 阈值校验）会撞上：
+阈值定不出来（歌有 30 秒也有 6 分钟）、倍速（1x~2x，服务端不知道倍速）、暂停会拉长
+时间差、并发可重叠绕过、**而且会误伤我们的断点续播**（用户从 3/4 处听到结尾，
+时间差只有歌长的 1/4，真听完的反而不计数）。天花板也很明确：换 IP 就能绕过，
+脚本还能用 ffmpeg 真拉流跑满时长——没有账号体系时这是终点。
+结论：发牌方案只能把"1 行 curl"抬成"写个 5 分钟脚本"，而这个榜不涉及发奖、
+被刷的损失很小，不值得为它引入前端改造 + 服务端状态 + 误伤风险。
+**将来若要加强，优先做这一条**：同 IP + 同一首歌每天最多计 3 次（零误伤、几乎零成本，
+脚本刷 100 次得有 34 个 IP）。不要做"同 IP 每天总上限"——NAT/校园网会让很多人共用
+一个出口 IP，那会一整个网络一起被误伤。
+
+**`csrf_exempt` 是预留的**：项目当前没启用 `CsrfViewMiddleware`（见 12.4 上线清单）。
+一旦启用，这个接口会返回 403，而前端是 `catch` 忽略失败的——**榜单会静默停掉、不报任何错**。
+这个接口没有会话语义（只收 sid/歌名/歌手做计数），所以保持豁免；
+启用 CSRF 时不要顺手把 `request.play_ended` 上那一行删掉。
+
+**上线初期的表现**：库里没有播放数据时，首页「今日热听榜」显示"暂无数据"，
+有几首就显示几首（不拿源站数据凑数）。
+
+### 8.10 歌手曲目库（歌手页第 1 页本地化）
+
+**它解决什么**：歌手详情页原本每次都要回源抓（虽有 2 小时页面缓存，但缓存一过期，
+第一个访客就要等半秒以上）。把歌手的曲目落库后，这一页可以整页本地渲染：**0 请求**。
+
+**当前只同步了列表前 5 页的歌手（480 位）**：先小范围验证机制，没有一次性跑全量。
+另外**每位歌手只抓第 1 页曲目**（源站一页 68 首），第 2 页及以后不抓 ——
+实测抽样 30 位歌手：40% 只有 1 页曲目，有分页的平均 5.8 页；全量深挖约需 9 万次请求、
+约 570 万首歌，性价比很低（见下面「为什么不跑全量」）。
+
+**一张表**（`Web/models.py` 的 `SingerSong`）：一行 = 某位歌手第 page 页的第 position 首。
+
+| 字段 | 说明 |
+|---|---|
+| `singer_sid` + `page` + `position` | 唯一键，顺带就是歌手页的查询索引 |
+| `sid` | 歌曲 id，站内播放页地址是 `/song/<sid>.html`。**这里不唯一**：同一首歌会出现在多位歌手名下（合唱／精选集），每个歌手页要各展示一份 |
+| `title` | 源站列表里的整串标题（"歌手 - 歌名"）。**刻意不拆**：歌名本身可能含 " - "，硬拆会把标题拆错 |
+
+存"页内序号"而不是一个全局序号，是为了不引入任何魔法数字（源站一页几条不用写进代码），
+跨页拼接也不用换算。
+
+另外给 `Singer` 表加了三个字段：
+- `intro` —— 歌手简介。爬曲目时源站那一页正好带着它，顺手存下来，整页才能本地渲染
+- `song_pages` —— 曲目总页数（源站分页区「尾页」的页码），第 1 页的分页器要用
+- `songs_synced_at` —— 最近同步时间，为空 = 还没同步过。**命令就靠它断点续跑**
+
+**怎么同步**（`Web/management/commands/sync_singer_songs.py`）
+
+```bash
+python manage.py sync_singer_songs                 # 全量（约 19 小时）
+python manage.py sync_singer_songs --limit 480     # 只要列表前 5 页歌手（源站一页 96 位）
+python manage.py sync_singer_songs --limit 20      # 试跑 20 位
+python manage.py sync_singer_songs --interval 0.5  # 缩短间隔（谨慎，容易被限流）
+python manage.py sync_singer_songs --refresh       # 已同步过的也重新来
+```
+
+- `--limit N` 是「**只在前 N 位的名单范围里干活**」，不是「最多干 N 个」：先按列表顺序
+  圈定范围，再筛掉已同步的。所以重跑既不会重复爬，也不会越过范围。
+- **请求节奏**：默认每位之间停 2.5 秒（≈ 0.4 次/秒）。实测单次抓取 0.43~0.48 秒，
+  480 位约 7 分钟，23,435 位约 19 小时。慢是**不被限流的前提** —— 一旦被限流，
+  PHPSESSID 失效会让全站数据变空，这个代价远大于多跑半天。
+- **中断了直接再跑同一条命令**就续上（靠 `songs_synced_at` 判断谁还没做过）。
+- 写库是「先删这位歌手这一页的旧行、再插新行」并包在一个事务里：源站删过歌时重跑
+  不会留下旧行；也不会出现"删除成功但插入失败"导致歌手页变空。
+- **标题截断**：实测源站最长的一条标题有 **264 个字符**，超过字段的 255 ——
+  SQLite 不校验会照收，换到 MySQL / PostgreSQL 会直接抛错，所以入库前统一截断。
+
+**页面怎么取数**（`Web/services/singer_library.py` 的 `page_songs`）
+
+| 请求 | 走哪条路 |
+|---|---|
+| 第 1 页，且这位歌手同步过 | **本地库**（0 请求） |
+| 第 1 页，这位歌手还没同步 | 回落爬虫（现状不变） |
+| 第 2 页及以后 | 一律回落爬虫（深分页没有入库） |
+
+所以**同步到一半、或者干脆没同步过的歌手都能正常访问**，不会出现空白页；
+未同步的那些只是慢一点（爬虫 + 2 小时页面缓存）。
+
+**实测（2026-09）**
+
+| 项 | 数值 |
+|---|---|
+| 已同步歌手 | 480 位（前 5 页 × 96） |
+| 曲目行数 / 库大小 | 32,413 首 / db.sqlite3 从 6.6 MB 增到 12.7 MB |
+| 歌手页第 1 页 | 爬虫冷抓 **0.576s** → 本地库 **0.146s**（爬虫被打桩仍返回 200，证明确实零回源） |
+| 单首占用（实测） | 约 183 字节（含唯一索引），所以跑全量 570 万首约 1.0 GB |
+| 试跑校验 | 20 位 = 1360 首（20×68）；`--refresh` 重跑行数不变（幂等）；截断最长标题 264→255 |
+
+**为什么不跑全量 / 不深挖**
+
+- **全量**：23,435 位 × 平均 3.9 页 ≈ 9.1 万次请求，按 0.4 次/秒要约 28 小时；而收益只是
+  "歌手页首访快半秒"。真要跑，用默认间隔约 19 小时（只跑第 1 页），`--limit` 可以随时扩大。
+- **深挖**：实测抽样里 40% 的歌手只有 1 页，热门歌手却有 10~36 页；按访问热度分层
+  （热门歌手深挖、长尾只存第 1 页）才是划算的做法，目前没做。
+- **搜索不接这个库**（评估后决定不做）：见下一节。
+
+**为什么搜索没有改成"本地优先"**（结论留档，别再重复评估）
+
+1. **FTS5 的 trigram 分词器不支持 2 字查询**：实测 `MATCH '周深'`、`MATCH '奕迅'`
+   全部 0 命中（只支持 ≥3 个字符），而本站绝大多数搜索正是两字歌手名 —— 这条路不可行。
+2. 改用 `LIKE '%词%'`（Django 的 `icontains`）可行且快：实测 160 万行 + `LIMIT 20`
+   约 0.001 秒（匹配行多、凑够条数就停）；但 `count(*)` 必须扫全表（约 0.45 秒），
+   所以只能不显示"共 N 条"。
+3. **真正的拦路虎是覆盖率**：现在只同步了 480/23,435 位歌手（约 2%），拿它回答搜索会
+   明显掉召回 —— 搜一首不在库里的歌会**搜不到**，而现在的搜索一定会给你源站的结果。
+   所以搜索仍走「本地曲库 + 按需补货」（见 8.6）。等曲目库覆盖够大时再评估。
+
+### 8.11 首页全本地化（随机点唱机）
+
+**它解决什么**：首页原来还有一块「流行脉搏」，数据来自爬虫 `fetch_home()` 抓的源站
+「流行趋势榜」—— 那是别人家的榜，跟本站访客没关系，而且只要源站抓不到，首页就少一块。
+现在整块换成**从本地歌手曲目库（`SingerSong`）随机抽的歌**，首页因此**一次源站都不请求**。
+
+**模块叫「随机点唱机」**：名字里直接点明"随机"，不叫「流行脉搏」（原名承诺的是"当下流行"，
+与随机推荐对不上）。数据源换成随机之后，原来那个指向 `/list/djwuqu.html` 的「更多」链接
+也一并去掉 —— 随机抽的歌跟 DJ 舞曲榜没有关系。
+
+**换批节奏**：整批缓存 `CACHE_TTL_HOURS_HOME`（缺省回落到全局 `CACHE_TTL_HOURS`，默认 2 小时），
+换批由**缓存过期后的第一个访客**触发，不是整点；同一批内所有访客看到的是同一组歌。
+缓存键 `bz_random_pick`，落在 `cache/` 目录（与站内其它缓存同一个地方）。
+条数由 `RANDOM_PICK_COUNT` 控制（默认 18），模板里不再截一次。
+
+**为什么整批缓存而不每次现摇**：`ORDER BY RANDOM()` 要扫全表（实测 32,413 行约 9 ms），
+首页是全站访问量最大的页面，不该每个请求都跑；而且只有缓存住才存在"一批"的概念。
+
+**为什么从 `SingerSong` 抽、不从 `Song` 抽**：本地 `Song` 表只沉淀"被搜索过"的歌
+（实测 134 行），随机取 18 首会大量重复；`SingerSong` 有 32,413 行（去重 31,013 首），
+抽出来才够散。
+
+**实测（2026-09）**：爬虫 `fetch_home` 被打桩成必炸时首页仍 200、曲目链接 18 条、
+爬虫调用次数 0；同一批内两次访问链接完全一致，清掉缓存键后再访问换成另一批。
+
+**唯一还在用 `fetch_home` 的地方是 sitemap**：`Web/views/request.py` 的 `sitemap` 借它取
+歌曲详情页地址（缓存 6 小时）。首页自己已经不用了。
+
 ## 九、播放功能说明
 
-- **全局播放条**：站内任意页面底部常驻，支持切歌、暂停/播放、进度拖拽、倍速。
-- **播放记忆**：歌曲进度、倍速、播放状态保存在浏览器 localStorage，刷新/重开自动恢复。
-- **刷新自动续播**：**正在播放时**刷新页面，会自动从断点继续播放，无需再点播放按钮。
-  若刷新前是暂停状态，则不会自动播放（符合浏览器自动播放策略）。
-- **歌曲页播放**：歌曲详情页操作区有「播放」按钮，点击直接加入播放并开播，
-  无需先加入待播放列表/喜欢列表。
+音乐**只能在歌曲详情页（`/song/<sid>.html`）播放**，全站不再有底部悬浮播放条。
+
+- **页面内播放器**：歌曲页内置播放器（原生 `<audio>`，逻辑见 `Web/static/js/song_player.js`），
+  支持播放/暂停、进度拖拽、时间显示、音量与静音、倍速（1x / 1.25x / 1.5x / 2x）、
+  歌词同步滚动、点击歌词跳转到对应时间。
+- **播放记忆**：播放进度、倍速、音量、静音状态保存在浏览器 localStorage，再次进入同一首会自动恢复。
+- **断点续播**：刷新前**正在播放**时，页面加载后自动从断点继续播放，无需再点播放按钮；
+  若刷新前是暂停状态，则不会自动播放（符合浏览器自动播放策略），但点击播放会从断点继续。
+- **列表页**：首页/榜单/搜索/歌手列表只展示歌曲条目，点进歌曲详情页才能播放。
+- **播放计数**：整首播完时上报一次，供首页「今日热听榜」排行（见 8.9）。中途暂停/关页面不计。
 
 ## 十、常见问题（FAQ）
 
 | 问题 | 解决办法 |
 |---|---|
-| 页面数据为空/首页空白 | ① 检查 `.env` 的 `MUSIC_2T58_PHPSESSID` 是否过期，更新后重启；② 源站可能暂时不可达，稍后重试 |
+| 页面数据为空（榜单/歌曲/歌手第 2 页起等） | ① 检查 `main.py` 三处域名是否为带 www 的 `https://www.2t58.com/`（见 7.4，最常见原因）；② 检查 `.env` 的 `MUSIC_2T58_PHPSESSID` 是否过期，更新后重启；③ 源站可能暂时不可达，稍后重试（空数据不会进缓存，源站恢复即自动恢复）。**注意首页不受影响**：它三块数据都读本地库，源站挂了也有内容（见 8.11） |
 | 修改代码后页面没变化 | ① 服务是否用 `--noreload` 启动（是则需手动重启）；② 浏览器强刷（Ctrl+F5）绕过本地缓存 |
-| 改了缓存时长/解析逻辑不生效 | 执行 `python -c "import shutil; shutil.rmtree('cache')"` 清缓存 |
-| 播放/下载失败 | 播放直链有时效，清掉 `cache/` 后重试；下载走 `/download/<sid>/mp3.html` 由后端代理 |
-| 控制台报 `Uncaught (in promise)` | 浏览器自动播放被拦截，属正常现象，点击播放按钮即可恢复 |
+| 改了**模板**但页面没变化 | `DEBUG=False` 时 Django 默认启用缓存模板加载器，改模板**必须重启服务**（只有 Python 代码会自动 reload） |
+| 页面某处冒出一段 `{# ... #}` 文字 | 模板里写了跨行 `{# #}`。Django 的 `{# #}` 只支持单行，跨行必须用 `{% comment %}...{% endcomment %}` |
+| 页面样式或功能"写了却没效果" | 模板里新增了 Tailwind 类名但忘了重编译 CSS：`Web/static-src/css/tailwindcss.exe -i Web/static-src/css/input.css -o Web/static/css/output.css`。重编译后 `output.css` 的版本号会自动变化，浏览器会重新拉取 |
+| 给 Font Awesome 图标加 `text-3xl` 之类的字号类没效果 | 正常现象，不是漏编译。FA 4.7 的 `.fa` 里写着 `font-size: inherit`（先 `font: 14px/1 FontAwesome`，紧接着又被 `inherit` 覆盖），而 Tailwind 的工具类包在 `@layer utilities` 里 —— **无层级样式永远压过分层样式**，与优先级、书写顺序都无关，所以图标的字号被 `inherit` 定死，`text-*` 一律无效。正确做法是用 FA 自带的大小类：`fa-lg` / `fa-2x` / `fa-3x` / `fa-4x`。**注意它们是 `em`（相对父级字号），不是固定像素** —— 同一套类在本项目实测：`fa-2x` 在 14px 的 `.card-body` 里是 28px、在 16px 的区块里是 32px；`fa-lg` 是 1.333em、`fa-3x` 是 3em、`fa-4x` 是 4em。**本项目的约定**：卡片图标与空态图标统一写 `fa-2x`，标题旁的行内小图标不写大小类（跟随 `text-sm`，即 14px）。**已全站统一**：`search.html` / `singer.html` / `new_songs.html` 空态原先用的 `text-3xl` 都已改成 `fa-2x` |
+| 改了缓存时长/解析逻辑不生效 | 页面缓存：执行 `python -c "import shutil; shutil.rmtree('cache')"` 清缓存；搜索相关：见下一行 |
+| 搜索页数据不更新 | 曲库有保鲜期（默认 12 小时）。想立刻重来：删掉 `db.sqlite3` 再跑 `python manage.py migrate`（库里全是缓存，删了无损） |
+| 搜索框只能输 15 个字 | 这是 `SEARCH_KEYWORD_MAX_CHARS` 限制的（前端 `maxlength` 与后端截断共用同一个值）。改 `.env` 后重启即可 |
+| 歌手大全的筛选按钮不见了 | 歌手数据来自本地名册，库里没有分类字段（源站也不提供结构化的地区/性别/类型），所以只做全量分页；带分类参数的地址会 301 跳到全量页。见 8.8 |
+| 歌手大全里没有某位歌手 | 名册由 `python manage.py sync_singers` 落库，源站新增的歌手要重新跑一次命令才会出现（见 8.8） |
+| 某个歌手大全页码打不开（404） | 页码超过了总页数（末页看页码条，页面上写的是「共 N 位歌手」）。越界页码现在直接 404，见 8.8 |
+| 歌手头像有的显示有的空白 | 头像优先用图床外链、没传上去的自动回落到源站原图。想补齐就跑 `python manage.py sync_singers`（逐张串行上传，见 8.8） |
+| 歌手页有的打开很快、有的要等半秒 | 已同步曲目的歌手第 1 页走本地库（毫秒级），其余歌手仍要回源抓（首次约 0.5 秒，之后 2 小时缓存）。当前只同步了列表前 5 页共 480 位，见 8.10 |
+| 怎么让更多歌手页走本地库 | 跑 `python manage.py sync_singer_songs`（不带 `--limit` 就是全量，约 19 小时；已同步过的会跳过）。`--limit 960` 这类可以按需扩大范围，见 8.10 |
+| 搜索为什么不用本地曲目库（SingerSong） | 覆盖率只有约 2%（480/23435 位歌手），拿它回答搜索会明显掉召回。所以搜索仍走源站曲库，理由与实测见 8.10 末尾 |
+| 首页「今日热听榜」是空的 | 库里还没有今天的播放数据 —— 要有人把歌**整首听完**才会计数（中途暂停、关页面不算）。听完一首刷新首页就会出现。见 8.9 |
+| 听完一首歌，首页「今日热听榜」没变化 | ① 同一 IP 对同一首歌在 `PLAY_DEDUP_MINUTES`（默认 10）分钟内重复听完只算 1 次，反复听同一首不会往上涨；② 是不是没播完就跳走了。见 8.9 |
+| 首页「今日热听榜」会不会被刷榜 | 会。只能挡住"低成本猛刷"（同 IP + 同一首 + 10 分钟去重），真要防死得校验实际播放时长。见 8.9 |
+| 首页「今日热听榜」什么时候归零 | 北京时间每天 00:00 自动就是新一天（按日期分桶，没有定时任务）。见 8.9 |
+| 首页「随机点唱机」什么时候换一批 | 整批缓存 `CACHE_TTL_HOURS_HOME`（默认 2 小时），由缓存过期后的**第一个访客**触发换批，不是整点；同一批内所有人看到的是同一组 18 首。见 8.11 |
+| 首页「随机点唱机」能抽到哪些歌 | 只从**已同步曲目**的歌手里抽（当前 480 位的第 1 页曲目，共 32,413 首），没同步过的歌手不会出现。想扩大就多跑 `sync_singer_songs`，见 8.10 |
+| 首页还要不要源站 | 不要。三块数据（歌手推荐 / 今日热听榜 / 随机点唱机）全读本地库，`fetch_home` 现在只剩 sitemap 在用。见 8.11 |
+| 搜某个词提示"已做屏蔽处理" | 该关键词被源站屏蔽了（实测「周杰伦」就是），换别的关键词即可；状态记录 7 天后会自动再验一次 |
+| 歌曲页没有下载按钮 / `/download/...` 打不开 | 预期行为：下载功能**暂时关闭**了（前端入口已撤，后端直接 404），后续会开放。见「功能特性」与十二节 |
+| 想重新开放下载 | 两处各删一行即可：① `Web/templates/song.html` 顶部注释里列的三块（按钮 / 弹窗 / 内联脚本）加回去；② `Web/views/request.py` 的 `download` 里删掉那行 `return HttpResponse('下载功能暂未开放', status=404)`。实现代码都没删，`fetch_download` 也还在 |
+| 播放失败 | 播放直链有时效，清掉 `cache/` 后重试 |
+| 刷新后没有自动继续播 | 该功能只在"刷新前正在播放"时触发；若刷新前是暂停状态，需手动点播放按钮（会自动从断点继续） |
+| 提示"浏览器拦截了自动播放" | 浏览器自动播放策略所致，点击播放按钮即可继续播放 |
 | 想改网站 SEO 标题/关键词 | 见 `.trae/documents/底部导航高亮与全站SEO优化.md` 及 `.trae/skills/seo-updater/` |
 
 ## 十一、开发约定
 
-- 新增页面：视图 + 爬虫方法 + 模板，**爬虫方法必须用 `_cached` 包一层**（参考第八节）。
+- 新增页面：视图 + 爬虫方法 + 模板，**爬虫方法必须用 `_cached` 包一层**（参考第八节；
+  搜索结果、歌手大全、歌手详情第 1 页（已同步曲目的那些）这几类页面例外，
+  它们分别走本地曲库、本地歌手库与本地曲目库）。
 - 所有外部数据（爬虫、API）调用处必须 `try/except` 降级空数据，保证页面永远可访问。
-- 静态资源引入带版本号（如 `player.js?v=v9`），改 JS/CSS 后记得升级版本号并强刷。
-- `.env` 不入库；`cache/` 不入库（已配置 .gitignore）。
+- 静态资源引入带版本号（如 `song_player.js?v=v2`），改 JS 后记得升级版本号并强刷。
+  `output.css` 不用手改：模板里写的是 `output.css?v={{ STATIC_VERSION }}`，
+  版本号自动取文件修改时间（见 `Web/services/site_info.py`），重编译后自动生效。
+- 模板里跨行注释必须用 `{% comment %}...{% endcomment %}`：Django 的 `{# #}` 只支持单行，
+  跨行写会把注释当正文渲染到页面上。
+- 改了模板必须**重启服务**才生效：`DEBUG=False` 时 Django 默认启用缓存模板加载器。
+- `.env` 不入库（配置模板见 `.env.example`）；`cache/`、`db.sqlite3` 不入库（已配置 .gitignore）。
+
+## 十二、二开改名指引（把本站改成你自己的站）
+
+### 12.1 改站点名称 / 联系方式（只改 .env，不动任何代码）
+
+全站品牌显示——浏览器标题、keywords、description、og/twitter 分享卡片、结构化数据、
+页头 logo、404/500 错误页——全部取自 `.env`：
+
+```ini
+SITE_NAME=你的站点名
+SITE_NAME_ALT=你的站点别称        # 不需要就留空
+SITE_CONTACT_EMAIL=你的邮箱
+SITE_CONTACT_WECHAT=你的微信
+SITE_CONTACT_TG=你的TG
+ANALYTICS_ID=你的51la统计ID       # 留空则不输出统计脚本
+```
+
+改完**重启服务**生效。模板里对应的变量由 [Web/services/site_info.py](Web/services/site_info.py)
+（context processor）统一注入：`{{ SITE_NAME }}`、`{{ SITE_NAME_ALT }}`、`{{ SITE_BRAND }}`、
+`{{ SITE_CONTACT_EMAIL }}`、`{{ ANALYTICS_ID }}`。
+
+> 注意：Django 的自动重载只监视 `.py` 文件，改 `.env` 不会触发重载，需手动重启。
+
+### 12.2 改 Django 包名 BeiZiMusic（可选，需要动目录）
+
+`BeiZiMusic` 是 **Python 包名（内层目录名）**，无法用 .env 变量替换，只能改目录 + 同步引用。
+只改站点显示名的话做 12.1 就够了；只有想彻底去掉原作者痕迹时才需要做本节。
+
+**当前结构**（要改的是内层那个 `BeiZiMusic/`）：
+
+```
+BeiZiMusic/                 ← 外层：项目根目录，名字随意，不影响运行
+├── BeiZiMusic/             ← 内层：Django 配置包 ★ 要改的就是它
+│   ├── settings.py         ← 全局配置
+│   ├── urls.py             ← 根路由
+│   ├── wsgi.py / asgi.py   ← 部署入口
+│   └── __init__.py
+├── manage.py               ← 管理命令入口
+├── Web/                    ← 应用（视图/模板/静态资源）
+└── SpiderServices/         ← 爬虫
+```
+
+#### 方式一：一键脚本（推荐）
+
+先在项目根目录提交一次快照便于回滚，再执行下面的命令（把 `music_site` 换成你想要的名字，
+须为合法 Python 标识符：字母/数字/下划线，且不能以数字开头）：
+
+```bash
+git add -A && git commit -m "改名前的快照"
+
+python -c "import pathlib,re; old,new='BeiZiMusic','music_site'; pathlib.Path(old).rename(new); [pathlib.Path(f).write_text(re.sub(rf'\b{old}\.',new+'.',pathlib.Path(f).read_text(encoding='utf-8')),encoding='utf-8') for f in ['manage.py',new+'/wsgi.py',new+'/asgi.py',new+'/settings.py']]; print('已改名为',new)"
+```
+
+它做两件事：① 把内层 `BeiZiMusic/` 目录改名为 `music_site/`；
+② 把 4 个文件里的 5 处 `BeiZiMusic.` 引用替换为新包名（已实测，不会误改 `Web.apps.WebConfig` 等无关内容）。
+
+#### 方式二：手工改（更直观）
+
+**第 1 步 · 重命名目录**：把内层 `BeiZiMusic/BeiZiMusic/` 改成 `BeiZiMusic/music_site/`。
+
+**第 2 步 · 修改 5 处引用**（改完即可运行）：
+
+| 文件 | 行 | 原文 | 改为 |
+|---|---|---|---|
+| `manage.py` | 9 | `'DJANGO_SETTINGS_MODULE', 'BeiZiMusic.settings'` | `'music_site.settings'` |
+| `music_site/wsgi.py` | 14 | `'DJANGO_SETTINGS_MODULE', 'BeiZiMusic.settings'` | `'music_site.settings'` |
+| `music_site/asgi.py` | 14 | `'DJANGO_SETTINGS_MODULE', 'BeiZiMusic.settings'` | `'music_site.settings'` |
+| `music_site/settings.py` | 44 | `ROOT_URLCONF = 'BeiZiMusic.urls'` | `'music_site.urls'` |
+| `music_site/settings.py` | 63 | `WSGI_APPLICATION = 'BeiZiMusic.wsgi.application'` | `'music_site.wsgi.application'` |
+
+**第 3 步 · 可选**：把 `wsgi.py` / `asgi.py` 文件头注释里的
+`WSGI config for BeiZiMusic project.` 也换成新名（纯注释，不影响运行）。
+
+#### 第 4 步 · 验证
+
+```bash
+python manage.py check       # 期望输出：System check identified no issues (0 silenced).
+python manage.py runserver   # 启动后访问 http://127.0.0.1:8000
+```
+
+**常见报错对照**：
+
+| 报错 | 原因 |
+|---|---|
+| `ModuleNotFoundError: No module named 'BeiZiMusic'` | 第 2 步的 5 处引用没改全，逐一核对 |
+| `ModuleNotFoundError: No module named 'music_site'` | 包目录没重命名成功，或目录名与引用不一致（大小写敏感） |
+
+### 12.3 建议一并替换的资源
+
+| 项 | 位置 | 说明 |
+|---|---|---|
+| 站点图标 | `media/favicon.ico` | 浏览器标签页图标 |
+| 分享默认图 | `Web/static/images/logo.png` | 社交分享卡片图（og:image / twitter:image） |
+| 百度站长验证 | `Web/templates/template.html` 的 `baidu-site-verification` meta | 换成自己的验证码，或删掉该行 |
+| 免责声明文案 | `Web/templates/common_html/footer.html` | 按自己所在地法律法规调整 |
+| 开源许可 | `LICENSE` | 二次分发请遵守原许可证 |
+
+### 12.4 上线前检查清单
+
+部署前先跑一遍自检，它会把你没配的安全项逐条列出来：
+
+```bash
+python manage.py check --deploy
+```
+
+当前项目跑这条命令会报 **0 个 ERROR + 5 个 WARNING**（W003 / W004 / W008 / W009 / W012，
+都是"还没填生产配置"，不是代码缺陷）。下面按"必须做 / 建议做"分开列。
+
+#### 必须做（不做会出事）
+
+| 项 | 怎么改 | 说明 |
+|---|---|---|
+| `SECRET_KEY`（W009） | `.env` 填一串 50 位以上随机值 | `.env.example` 里是占位符。密钥泄露 = 会话/签名可被伪造 |
+| `DEBUG`（W018） | `.env` 设 `DEBUG=False` | 生产环境开着会把源码路径、配置直接显示给访客 |
+| `ALLOWED_HOSTS` | `.env` 填真实域名，多个用逗号分隔 | 不填等于允许任意 Host 头 |
+| `MUSIC_2T58_PHPSESSID` | `.env` 填有效值（见 7.1） | 不配则除首页外的页面都抓不到数据（首页三块全读本地库，见 8.11） |
+| 建表 | `python manage.py migrate` | 曲库三张表（`Song` / `SearchKeyword` / `SearchResult`）、歌手名册表（`Singer`）、歌手曲目表（`SingerSong`）与播放次数表（`SongPlay`）都靠迁移创建，不跑就没有搜索功能、歌手大全是空的、首页「今日热听榜」和「随机点唱机」也是空的 |
+| 静态文件 | 不用做；只在想把静态文件交给 Nginx/CDN 托管时才 `collectstatic` | 本项目静态资源就放在 `Web/static`，开发与生产都直接对外服务（`DEBUG=False` 时由 `XiaoYingMusic/urls.py` 手动挂路由），不依赖 `collectstatic`。真要收集时目标是 `staticfiles/`（与源目录分开） |
+| CSRF 中间件（W003） | 打开 `settings.py` 里注释掉的 `django.middleware.csrf.CsrfViewMiddleware` | 本站目前没有任何 POST 表单（搜索是 GET 跳转），开启不会影响现有功能；以后新增表单记得带 `{% csrf_token %}`。**注意**：`/api/play/ended` 已带 `csrf_exempt`，那里不能删（见 8.9） |
+
+#### HTTPS 相关（站点走 HTTPS 才做）
+
+| 项 | 建议值 | 说明 |
+|---|---|---|
+| `SECURE_SSL_REDIRECT`（W008） | `True` | 把 http 全部跳到 https。若在 Nginx/负载均衡上已做跳转，这里可不设 |
+| `USE_X_FORWARDED_PROTO` | `True` | 站点跑在 HTTPS 反向代理后面时**必须**开：Django 默认不信任 `X-Forwarded-Proto`，`request.scheme` 会恒为 `http`，导致 canonical / og:url / sitemap.xml / robots.txt 里全是 `http://` 地址。**没有反向代理时不要开**（该头可被客户端伪造） |
+| `SESSION_COOKIE_SECURE`（W012） | `True` | 会话 Cookie 只在 https 下发送 |
+| `CSRF_COOKIE_SECURE` | `True` | 同上，针对 CSRF Cookie |
+| `SECURE_HSTS_SECONDS`（W004） | 先 `31536000`，**确认全站 https 无遗漏再开** | HSTS 是不可逆的：一旦下发，浏览器在有效期内拒绝走 http。配错会把站点锁死，务必最后一步再开 |
+
+#### 建议做
+
+| 项 | 说明 |
+|---|---|
+| 数据库 | 曲库用 SQLite（`db.sqlite3`），已开 WAL。流量上来后若日志频繁出现 `database is locked`，按 `Web/services/db_alert.py` 邮件里的步骤换成 MySQL / PostgreSQL |
+| 数据库备份 | 定期备份 `db.sqlite3`（要连 `-wal` 一起拷，或先 `PRAGMA wal_checkpoint`）。现成脚本见 13.13 |
+| 缓存清理 | 页面缓存文件会持续累积，可按需清理 `cache/` 目录（清了只是下次访问重新抓，无副作用） |
+| 告警邮件 | 确认 `Web/services/db_alert.py` 的收件配置可用，换库告警才会真的发出来 |
+| 统计 ID | `ANALYTICS_ID` 换成自己的，或留空关闭统计（二开者务必替换，否则数据混入原作者账号） |
+| 站点图标与分享图 | 见 12.3 |
+
+> 上面的检查项过完，要真正把站点跑起来时，直接看**第十三章（宝塔 + uWSGI 部署）**，
+> 那里把"传代码 → 建环境 → 放 .env 和数据库 → 配 uWSGI/Nginx → HTTPS → 权限 → 自检"按顺序列全了。
+
+## 十三、宝塔面板 + uWSGI 部署（Linux 服务器）
+
+面向「宝塔面板 + Nginx + uWSGI + SQLite」这套组合。全程**不需要 `collectstatic`** ——
+本项目静态文件直接放在 `Web/static`，`DEBUG=False` 时由 Django 自己服务
+（见 `XiaoYingMusic/urls.py`），也可以交给 Nginx 直接发（见 13.8，更快）。
+
+### 13.1 动手前必须知道的 6 件事
+
+| # | 事项 | 说明 |
+|---|---|---|
+| 1 | **Python 必须 ≥ 3.12** | Django 6.1 的包元数据写着 `Requires-Python: >=3.12`（作者本机 3.14.5）。宝塔里选不到 3.12+ 就先去项目管理器装一个，否则 `pip install` 会直接报 `Could not find a version that satisfies Django==6.1` |
+| 2 | **uWSGI 不在 `requirements.txt` 里** | 它在 Windows 上编译不过，所以只在服务器上单独装：`pip install uwsgi` |
+| 3 | **`.env` 不在仓库里** | 里面有 `SECRET_KEY` / `PHPSESSID` / 小影 API 密钥，已被 gitignore。必须在服务器上从 `.env.example` 改一份出来 |
+| 4 | **数据库要拷一次种子库** | 仓库里放的是**只读快照** `deploy/seed_db.sqlite3`（歌手 23,435 位 / 曲目 32,413 首 / 图床封面 23,397 张），部署时拷成 `db.sqlite3`。**只拷这一次**，之后线上的库就是唯一真相 |
+| 5 | **`db.sqlite3` 永远不进 git** | 站点跑起来后搜索、播放计数会不断改写它。保持它未被跟踪，以后 `git pull` 才不会冲突（完整原因写在 `.gitignore` 注释里） |
+| 6 | **项目目录必须可写** | SQLite 要在 `db.sqlite3` 旁边创建 `-wal` / `-shm`，文件缓存要写 `cache/`。整体交给 `www` 用户即可（见 13.10） |
+
+### 13.2 一、准备环境
+
+宝塔「软件商店」里装好：
+
+- **Nginx**（必装）
+- **Python 项目管理器**（新版本面板叫「网站 → Python 项目」）
+- 在项目管理器里确认有 **Python 3.12 / 3.13 / 3.14**；没有就点安装
+
+编译 `lxml` 和 `uwsgi` 需要编译环境，顺手装上（宝塔终端里跑）：
+
+```bash
+# CentOS / 阿里云 Linux
+yum install -y gcc gcc-c++ make python3-devel libxml2-devel libxslt-devel
+
+# Ubuntu / Debian
+apt update && apt install -y build-essential python3-dev libxml2-dev libxslt1-dev
+```
+
+### 13.3 二、上传代码
+
+下文统一用 `/www/wwwroot/BeiZiMusic` 作为项目路径，换了目录就同步改
+`uwsgi.ini` 里的 `chdir` / `home` / `socket` / `pidfile` / `logto`。
+
+```bash
+cd /www/wwwroot
+# 方式 A：直接 clone（私有仓库要先配 SSH key，或把地址写成 https://用户名:token@github.com/...）
+git clone https://github.com/<你的账号>/<仓库名>.git BeiZiMusic
+```
+
+方式 B：打包成 zip，用宝塔「文件」上传后在线解压。
+（不用管包里有没有 `.git`；`db.sqlite3`、`cache/`、`.env` 本来就不在里面，按下面几步补。）
+
+### 13.4 三、建虚拟环境、装依赖
+
+```bash
+cd /www/wwwroot/BeiZiMusic
+/usr/bin/python3.12 -m venv .venv            # 版本按 13.2 里装好的填
+source .venv/bin/activate
+pip install -U pip
+pip install -r requirements.txt              # 版本已锁死，装出来和作者本机一致
+pip install uwsgi                            # 服务器专用
+```
+
+确认解释器和框架版本对得上：
+
+```bash
+python -c "import sys, django; print(sys.version.split()[0], django.get_version())"
+# 期望输出：3.12.x 6.1（或更高的小版本 + 6.1）
+```
+
+### 13.5 四、放 `.env` 与数据库（关键的两步）
+
+**① 生成 `.env`**
+
+```bash
+cp .env.example .env
+vi .env
+```
+
+至少要改的几项：
+
+| 变量 | 填什么 |
+|---|---|
+| `SECRET_KEY` | 换成新生成的随机串（`.env.example` 里是占位符）。生成命令：`python -c "from django.core.management.utils import get_random_secret_key as g; print(g())"` |
+| `DEBUG` | `False` |
+| `ALLOWED_HOSTS` | 你的域名（多个用逗号分隔），别留 `*` |
+| `MUSIC_2T58_PHPSESSID` | 源站人机验证通过后的 Cookie（获取方法见 7.1）。**不配就只有首页和本地库页面有数据** |
+| `SITE_NAME` / `SITE_NAME_ALT` | 站点名（见 12.1） |
+| `SITE_CONTACT_*` | 页脚「联系我们」里的微信 / 邮箱 / TG |
+| `USE_X_FORWARDED_PROTO` | 站点走 HTTPS 时设 `True`，否则 canonical / sitemap 里全是 `http://`（见 13.9） |
+
+**② 把种子库拷成正式库**（只做这一次）
+
+```bash
+cp deploy/seed_db.sqlite3 db.sqlite3
+```
+
+拷完可以确认数据在不在（只读，不改库）：
+
+```bash
+python manage.py shell -c "from Web.models import Singer, SingerSong; print(Singer.objects.count(), SingerSong.objects.count())"
+# 期望输出：23435 32413
+```
+
+> ⚠️ **以后更新代码时不要再拷一次**，否则线上积累的搜索记录与播放榜会被快照覆盖掉。
+>
+> 想重新生成种子库，在**本地**跑（第二条用 SQLite 的在线备份 API，站点正跑着也能取到一致快照，
+> 最后 `VACUUM` 压体积 —— 本次实测 12.71 MB → 10.57 MB）：
+>
+> ```bash
+> python -c "import sqlite3;c=sqlite3.connect('db.sqlite3');print(c.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone());c.close()"
+> python -c "import sqlite3;s=sqlite3.connect('db.sqlite3');d=sqlite3.connect('deploy/seed_db.sqlite3');s.backup(d);d.execute('VACUUM');d.close();s.close()"
+> ```
+>
+> 生成完 `git add deploy/seed_db.sqlite3` 提交即可（该文件已在 `.gitignore` 里做了例外放行）。
+
+### 13.6 五、uwsgi.ini
+
+**仓库根目录已经带了一份可直接用的 `uwsgi.ini`**（内容如下，按需改路径即可）：
+
+```ini
+[uwsgi]
+; ---- 项目与入口 ----
+chdir = /www/wwwroot/BeiZiMusic
+; 对应 XiaoYingMusic/wsgi.py 里的 application
+module = XiaoYingMusic.wsgi:application
+; 用项目自带的虚拟环境（装了 requirements.txt 那一套依赖）
+home = /www/wwwroot/BeiZiMusic/.venv
+
+; ---- 与 Nginx 之间的通道 ----
+; 走本地 socket：比 HTTP 端口快，也不必对外暴露端口。
+; 想不经 Nginx 单独试跑时，把下面这行注释掉、改用 http = 127.0.0.1:8001
+socket = 127.0.0.1:8001
+
+; ---- 进程模型 ----
+master = true
+; SQLite 的写锁是单点的：进程开得越多，越容易撞 "database is locked"。
+; 本站读多写少（且已开 WAL + 20 秒写锁等待），2~4 个进程足够。
+processes = 2
+threads = 4
+; 每个进程处理 N 个请求后重启，防第三方库长期运行的内存泄漏
+max-requests = 5000
+
+; ---- 超时与缓冲 ----
+; 搜索页/榜单页首次要等源站抓取（实测 0.5~2 秒），给足余量
+harakiri = 60
+buffer-size = 8192
+
+; ---- 其它 ----
+vacuum = true
+die-on-term = true
+; 让日志里的时间戳是北京时间（业务时区由 settings.TIME_ZONE 保证，与此无关）
+env = TZ=Asia/Shanghai
+pidfile = /www/wwwroot/BeiZiMusic/uwsgi.pid
+logto = /www/wwwlogs/beizimusic-uwsgi.log
+```
+
+手工试跑（前台，`Ctrl+C` 退出）：
+
+```bash
+source .venv/bin/activate
+uwsgi --ini uwsgi.ini
+```
+
+### 13.7 六、交给宝塔托管（推荐）
+
+宝塔 → **网站 → Python 项目 → 添加 Python 项目**，按这张表填
+（面板版本不同字段名会有差异，对不上就跳到本节末尾的"命令行方式"）：
+
+| 面板字段 | 填什么 |
+|---|---|
+| 项目名称 | `BeiZiMusic` |
+| 项目路径 | `/www/wwwroot/BeiZiMusic` |
+| Python 版本 | 13.2 里装好的 **3.12+** |
+| 框架 | Django |
+| 启动方式 | **uwsgi** |
+| 启动文件 | `XiaoYingMusic/wsgi.py`（面板要求选 `manage.py` 的话也能起来） |
+| 端口 | 与 `uwsgi.ini` 的 socket 一致：`8001` |
+| 运行用户 | `www` |
+| 安装依赖 | 选「否」（13.4 已经装过） |
+| 开机自启 | 是 |
+
+启动后看面板的日志输出。**分不清面板到底用没用你那份配置时**，最稳的做法是在面板里把
+「启动命令」手工填成下面这一行：
+
+```bash
+/www/wwwroot/BeiZiMusic/.venv/bin/uwsgi --ini /www/wwwroot/BeiZiMusic/uwsgi.ini
+```
+
+### 13.8 七、Nginx 反向代理（+ 静态文件）
+
+宝塔 → 网站 → 添加站点（只填域名，PHP/纯静态都不用勾）→ 进站点的「配置文件」，
+把 `server {}` 改/加成：
+
+```nginx
+server {
+    listen 80;
+    server_name your-domain.com;
+
+    # 静态文件交给 Nginx（不经 uWSGI）：本项目不用 collectstatic，
+    # 静态源目录就是 Web/static，编译产物 output.css 也在里面。
+    # 注意：location 与 alias 的结尾斜杠必须成对，否则会 404。
+    location ^~ /static/ {
+        alias /www/wwwroot/BeiZiMusic/Web/static/;
+        expires 7d;
+        add_header Cache-Control "public";
+    }
+    location ^~ /media/ {
+        alias /www/wwwroot/BeiZiMusic/media/;
+        expires 7d;
+    }
+
+    # 其余全部交给 uWSGI
+    location / {
+        include uwsgi_params;
+        uwsgi_pass 127.0.0.1:8001;
+        uwsgi_read_timeout 60s;
+        # 走 HTTPS 时必须加这行，Django 才知道外部是 https（配合 .env 的 USE_X_FORWARDED_PROTO）
+        uwsgi_param HTTP_X_FORWARDED_PROTO $scheme;
+    }
+}
+```
+
+> 用 `proxy_pass http://127.0.0.1:8001` 也能通（那 `uwsgi.ini` 里要改成 `http = 127.0.0.1:8001`），
+> 对应的一行要写成 `proxy_set_header X-Forwarded-Proto $scheme;`。
+> `/robots.txt`、`/sitemap.xml` 是 Django 视图，**别给它们配静态规则**，必须走反代。
+
+### 13.9 八、HTTPS（建议做）
+
+1. 宝塔 → 站点 → SSL → **Let's Encrypt** 一键申请证书；
+2. 勾选「强制 HTTPS」（在 Nginx 层做 301，Django 不用改）；
+3. `.env` 里把 `USE_X_FORWARDED_PROTO` 改成 `True` 并重启 uWSGI —— 否则 canonical / og:url /
+   sitemap 里全是 `http://`（伤 SEO）；
+4. 再按 12.4 的「HTTPS 相关」表把 `SESSION_COOKIE_SECURE` 等打开。
+
+### 13.10 九、权限（漏了会静默出问题）
+
+```bash
+chown -R www:www /www/wwwroot/BeiZiMusic
+find /www/wwwroot/BeiZiMusic -type d -exec chmod 755 {} \;
+find /www/wwwroot/BeiZiMusic -type f -exec chmod 644 {} \;
+```
+
+- **项目目录整体要可写**：SQLite 要在 `db.sqlite3` 旁边创建 `-wal` / `-shm`，缓存要写 `cache/`；
+- 只把 `db.sqlite3` 设成可写**不够** —— 目录不可写时 SQLite 一样报错；
+- `.env` 至少要被 `www` 读到。
+
+### 13.11 十、上线后的自检（按顺序点一遍）
+
+| 检查项 | 怎么查 | 期望 |
+|---|---|---|
+| 首页 | 打开 `/` | 有歌手墙 + 今日热听榜 + 随机点唱机。注意首页**不经过源站**，它正常不代表爬虫正常 |
+| 爬虫通不通 | 打开 `/list/top.html`，或随便点一首歌 | 有数据（首次等 0.5~2 秒）→ 说明 PHPSESSID 有效、服务器 IP 没被源站风控 |
+| 本地库 | 打开 `/singerlist/index/index/index/index.html` | 一页 96 位歌手、头像正常 |
+| 搜索 | 搜一个词 | 有结果；第一次慢、之后快（结果已落本地库） |
+| 静态文件 | F12 看 CSS/JS 请求 | 全 200（有 404 就是样式丢失的原因） |
+| 安全自检 | `python manage.py check --deploy` | 只剩 12.4 里列的那几个 WARNING |
+| 换库告警邮件 | 见 `Web/services/db_alert.py` | 配好收件人，写锁冲突时才会真的发出来 |
+
+```bash
+python manage.py check            # 期望：System check identified no issues (0 silenced).
+python manage.py migrate --check  # 期望：无输出、退出码 0（种子库里的迁移都已应用）
+```
+
+### 13.12 十一、日常更新流程
+
+```bash
+cd /www/wwwroot/BeiZiMusic
+
+# 1) 拉代码（db.sqlite3 没被跟踪，所以这一步永远不会冲突）
+sudo -u www git pull
+
+# 2) 只有依赖有变动时才跑
+source .venv/bin/activate && pip install -r requirements.txt
+
+# 3) 改了模板/CSS/Python 都要重启（DEBUG=False 时 Django 会缓存模板，见 FAQ）
+uwsgi --reload /www/wwwroot/BeiZiMusic/uwsgi.pid      # 或在面板点「重启」
+
+# 4) 只有改了缓存时长或爬虫解析逻辑时才需要清页面缓存
+rm -rf /www/wwwroot/BeiZiMusic/cache/*
+```
+
+### 13.13 十二、备份数据库（建议做成计划任务）
+
+数据库正在被写的时候直接 `cp` 有可能拷到半截状态。宝塔 → 计划任务 → Shell 脚本，每天跑一次：
+
+```bash
+#!/bin/bash
+cd /www/wwwroot/BeiZiMusic
+PY=/www/wwwroot/BeiZiMusic/.venv/bin/python
+mkdir -p /www/backup/music
+# 先把 WAL 合并回主库（打印 (0, 0, 0) 才算成功），再拷
+$PY -c "import sqlite3;c=sqlite3.connect('db.sqlite3');print(c.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone());c.close()"
+cp db.sqlite3 /www/backup/music/db-$(date +%F).sqlite3
+# 只保留最近 7 天
+find /www/backup/music -name 'db-*.sqlite3' -mtime +7 -delete
+```
+
+### 13.14 排错对照表
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| 502 Bad Gateway | uWSGI 没起来 / socket 不通 | 看 `logto` 指向的日志；`ps aux \| grep uwsgi`；确认 ini 里的 socket 与 Nginx 的 `uwsgi_pass` 一致 |
+| 样式全丢、CSS 404 | 静态文件没走通 | 确认 `DEBUG=False`（Django 会自己服务 `/static/`）；走 Nginx 时检查 `alias` 两端斜杠与路径 |
+| 改了模板不生效 | `DEBUG=False` 时 Django 用缓存模板加载器 | 重启 uWSGI（FAQ 也有这条） |
+| 除首页外都是空 | `MUSIC_2T58_PHPSESSID` 失效，或服务器 IP 被源站风控 | 重新获取（见 7.1）；换机房 IP 试试 |
+| 500，日志里 `could not convert string to float` | `.env` 里 `CACHE_TTL_HOURS` 写成了空值 | 填 `2`（已知坑，见 14.2） |
+| 搜索/播放计数没反应 | `db.sqlite3` 或 `cache/` 不可写 | 按 13.10 重新授权，注意**目录**也要可写 |
+| 频繁 `database is locked` | SQLite 写锁冲突 | 把 `processes` 降下来；仍频繁就按 `db_alert` 邮件里的步骤换 MySQL / PostgreSQL |
+| canonical / sitemap 里全是 `http://` | 反代没传协议头，或 `USE_X_FORWARDED_PROTO` 没开 | 见 13.9 |
+| 打开是默认页或 404 | 站点根目录指到了别处 | 站点配置里只留 `location /` 反代，别让它去读目录里的 `index.html` |
+| 页面正常但数据是空的 | 忘了拷种子库 | `cp deploy/seed_db.sqlite3 db.sqlite3`（见 13.5） |
+
+## 十四、已知不足与可优化项
+
+以下都是**当前真实存在、尚未处理**的问题，按"值不值得动手"排序。每条都给了定位与实测数据，方便直接开工；
+其中多数是刻意取舍的结果（比如"不跑全量"），不是漏掉的 TODO。
+
+### 14.1 数据覆盖：本地库只覆盖了很小一部分
+
+| 现象 | 现状 | 代价 |
+|---|---|---|
+| 歌手页第 2 页起仍回源 | 只同步了列表前 5 页 480 位歌手的**第 1 页**曲目（32,413 首） | 翻页要等爬虫（首次约 0.5~1.9 秒），之后走 2 小时页面缓存。见 8.10 |
+| 站内搜索仍是「本地曲库 + 按需补货」 | 曲目库只覆盖 480 / 23,435 位歌手（约 2%） | 第一次搜某个词必须等源站；源站屏蔽的词（实测「周杰伦」）搜不到 |
+| 图床封面缺 38 位 | 其中 31 位源站本身没有图（`source_pic` 结尾是空的 `&src=`），7 位上传时图床返回 502 | 这 38 位在歌手大全/歌手页会显示**破图**（`Singer.pic` 返回空串，模板没做占位兜底） |
+
+**想扩大覆盖**：7 位 502 的重跑一次 `sync_singers` 就能补（命令幂等，只处理没封面的）；
+扩曲目库用 `sync_singer_songs`，全量约 19 小时（只第 1 页）/ 约 28 小时（连分页）。
+数据量不是瓶颈 —— 按实测每首约 183 字节估算，全量约 570 万首 ≈ 1.0 GB；
+瓶颈是**回源次数**（约 9.1 万次请求），跑快了容易被源站限流。
+
+### 14.2 稳定性：三个会被线上触发的隐患（都还没修）
+
+1. **`.env` 里把 `CACHE_TTL_HOURS` 写成空值 → 全站 500。**
+   `SpiderServices/Music_2t58/main.py` 用的是 `float(os.getenv('CACHE_TTL_HOURS', '2'))`：
+   环境变量**存在但为空**时 `os.getenv` 返回 `''`（不会退回默认值），`float('')` 在模块导入期抛
+   `ValueError`，于是所有 import 爬虫的视图全挂。同文件里其它 `float()` / `int()` 读配置的写法有同样的坑。
+   建议统一改成 `float(os.getenv('X') or '2')`。
+2. **播放计数与搜索计数的首次写入没走写锁容错。**
+   `Web/services/play_rank.py` 的 `SongPlay.objects.get_or_create(...)`、
+   `Web/services/music_library.py` 的计数写入都是直接落库，只有紧跟其后的 `update` 包了 `_write()`。
+   多人同时触发时会冒 `database is locked`：前台表现为这一次计数丢失（前端会静默吞掉），
+   后台可能误发换库告警邮件。
+3. **越界的歌手页会被缓存 2 小时并输出 `index, follow`。**
+   `/singer/<sid>/99.html` 这种页码，源站仍会返回歌手信息（只是没有歌），
+   于是被判为"有内容"→ 整页缓存 2 小时、允许收录，搜索引擎能收录出无穷多个空壳页。
+   **歌手大全已经改成越界直接 404**（见 8.8），歌手页还没对齐。
+
+### 14.3 性能：还剩一处会扫全表
+
+首页「随机点唱机」用 `ORDER BY RANDOM()`，SQLite 需要扫全表（实测 32,413 行约 9 ms）。
+整批缓存之后**每个请求不会重复扫**，所以现在完全够用；但如果曲目表涨到千万级
+（跑完全量再深挖就是 570 万），这里要改成"随机取 id 再按 id 查"的采样方式。见 8.11。
+
+### 14.4 工程与交付
+
+| 项 | 现状 | 建议 |
+|---|---|---|
+| 自动化测试 | **一个都没有**，本项目的验证都是临时脚本 + 浏览器手工跑的 | 优先给「分页器边界 / 缓存 TTL / 主要路由 200」补 Django `TestCase` —— 这三块最容易改坏 |
+| 生产安全项 | `manage.py check --deploy` 报 5 个 WARNING（密钥弱、HTTPS/HSTS 未配、CSRF 中间件关闭） | 见 12.4 的清单，上线前逐条过 |
+| 种子库要手工重生成 | 仓库里的 `deploy/seed_db.sqlite3` 是快照，数据涨了不会自动更新 | 想更新就按 13.5 的两条命令重跑一遍再提交（没做成管理命令，避免多一个只在本地用的入口） |
+| 历史文档债 | `.trae/` 下的技能文档还写着已删除的歌单/MV 板块与 layui/base.css | 与运行无关，纯文档 |
+
+> 依赖版本已在 2026-09 锁死（`django==6.1` 等，见 `requirements.txt`），所以"服务器装出来和本地不一致"这类问题不再是风险。
+
+### 14.5 体验
+
+- **歌曲页歌词首屏是空的**：歌词要等 `audio` 的 `play` 事件才渲染（见 `Web/static/js/song_player.js`），
+  不点播放时歌词区一片空白。可以改成服务端直出，或在 `loadedmetadata` 时就先渲染。
+- **新站首页「今日热听榜」是空的**：库里没有播放数据时该块显示"暂无数据"（刻意不拿源站数据凑数，见 8.9），
+  可以考虑回落到「随机点唱机」的数据。
+- **搜索没有兜底**：源站屏蔽的词没有替代方案（屏蔽状态 7 天后会自动重验，但实测一直是被屏蔽的），
+  可以考虑源站返回空时回落到本地曲目库做模糊匹配（`icontains` 实测可用，见 8.10 末尾）。

@@ -1,1 +1,4 @@
 * text=auto
+
+# 部署用的种子库是二进制：禁止换行符转换，也不要尝试 diff（否则 git 会把它当文本处理）
+deploy/seed_db.sqlite3 binary

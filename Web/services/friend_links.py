@@ -3,19 +3,18 @@
 # 职责：后端统一拉取小影 API 的友情链接，模块级缓存 1 小时，供全站模板渲染。
 # 关键约束：链接必须在服务端抓取并渲染进 HTML（搜索引擎直接可见），
 #          绝不通过前端 JS 请求 API（搜索引擎爬虫执行不到 JS，会漏掉链接）。
-import os
+import logging
 import threading
 import time
-import logging
 
 import requests
 
+from Web.services.xiaoying_api import API_BASE, USER_AGENT, auth_params
+
 logger = logging.getLogger(__name__)
 
-# 小影 API 基础地址（用户提供，可写入 .env 覆盖默认值）
-API_BASE = os.getenv('XIAOYING_API_BASE', 'https://xiaoyingapi.com')
-# 友情链接接口：status=true 只返回启用状态的链接
-FRIEND_LINKS_URL = f'{API_BASE}/api/seo/friend_links?status=true'
+# 友情链接接口路径（status=true 只返回启用状态的链接）
+FRIEND_LINKS_PATH = '/api/seo/friend_links'
 # 缓存有效期：1 小时（过期后在请求时后台线程静默刷新）
 CACHE_TTL = 60 * 60
 # 请求超时（秒）
@@ -27,17 +26,25 @@ _lock = threading.Lock()
 
 
 def _fetch_links():
-    """从小影 API 拉取并过滤友情链接（失败返回空列表，页面保持可访问）"""
+    """从小影 API 拉取并过滤友情链接
+
+    返回链接列表；**拉取失败返回 None**，用来区别于"接口正常、但一条链接都没有"的 []。
+    调用方靠这个区分决定要不要覆盖缓存 —— 否则一次网络抖动就会把全站友情链接清空一小时。
+    """
     try:
-        resp = requests.get(FRIEND_LINKS_URL, timeout=REQUEST_TIMEOUT, headers={
-            'User-Agent': (
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                'AppleWebKit/537.36 (KHTML, like Gecko) '
-                'Chrome/131.0.0.0 Safari/537.36'
-            ),
-        })
+        resp = requests.get(
+            f'{API_BASE}{FRIEND_LINKS_PATH}',
+            params=auth_params({'status': 'true'}),
+            timeout=REQUEST_TIMEOUT,
+            headers={'User-Agent': USER_AGENT},
+        )
         resp.raise_for_status()
-        items = resp.json().get('data', {}).get('items', []) or []
+        # 兼容接口返回错误结构（如 {"code":20011,"msg":"签名参数缺失...","data":null}）：
+        # data 可能为 null，必须安全提取，否则 .get() 会抛 NoneType 异常
+        payload = resp.json() or {}
+        items = (payload.get('data') or {}).get('items') or []
+        if not items:
+            logger.warning('小影 API 未返回友情链接数据: %s', payload.get('msg') or payload)
         links = []
         for item in items:
             name = (item.get('name') or '').strip()
@@ -55,17 +62,22 @@ def _fetch_links():
         return links
     except Exception:
         logger.exception('拉取小影 API 友情链接失败')
-        return []
+        return None
 
 
 def _refresh():
-    """同步拉取并写入缓存（内部调用，线程安全）"""
+    """同步拉取并写入缓存（内部调用，线程安全）
+
+    失败时保留上一次的链接，只把时间戳往后推：不推的话每个请求都会再试一次，
+    接口挂掉时请求量会随访问量放大；而把空结果写进缓存又会让全站链接凭空消失一小时。
+    """
     with _lock:
         _cache['fetching'] = True
     try:
         links = _fetch_links()
         with _lock:
-            _cache['links'] = links
+            if links is not None:
+                _cache['links'] = links
             _cache['fetched_at'] = time.time()
     finally:
         with _lock:

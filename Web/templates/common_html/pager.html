@@ -1,0 +1,11 @@
+{# 分页器：全站列表页共用（依赖上下文 pagination.links，含 text / href / current）#}
+{% if pagination.links %}
+<div class="mt-6 flex justify-center">
+    <div class="join">
+        {% for link in pagination.links %}
+        <a class="join-item btn btn-sm {% if link.current %}btn-primary{% elif not link.href %}btn-disabled{% else %}btn-ghost{% endif %}"
+            {% if link.href %}href="{{ link.href }}"{% endif %}>{{ link.text }}</a>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}

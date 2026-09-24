@@ -1,9 +1,0 @@
-@font-face {
-    font-family: 'iconfont';
-    src: url('../layui/font/iconfont.eot');
-    src: url('../layui/font/iconfont.eot?#iefix') format('embedded-opentype'),
-         url('../layui/font/iconfont.woff2') format('woff2'),
-         url('../layui/font/iconfont.woff') format('woff'),
-         url('../layui/font/iconfont.ttf') format('truetype'),
-         url('../layui/font/iconfont.svg#iconfont') format('svg');
-}

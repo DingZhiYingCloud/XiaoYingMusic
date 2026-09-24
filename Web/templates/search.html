@@ -1,44 +1,61 @@
 {% extends 'template.html' %}
 
-{% block title %}{{ keyword }}搜索 - {{ keyword }}免费音乐下载 - 爱听音乐网{% endblock %}
-{% block keywords %}{{ keyword }},{{ keyword }}搜索,{{ keyword }}歌曲免费下载,{{ keyword }}MP3,{{ keyword }}歌词,{{ keyword }}在线听,在线听音乐,免费听歌,在线听歌,免费音乐,爱听音乐网,杯子音乐网{% endblock %}
-{% block description %}爱听音乐网（杯子音乐网）搜索{{ keyword }}相关歌曲结果,提供{{ keyword }}歌曲免费在线听完整歌曲,无需登录、无需下载音乐软件即可在线播放,支持{{ keyword }}歌词与MV视频在线观看,还有{{ keyword }}好听的歌免费听。{% endblock %}
+{% block title %}{{ keyword }}搜索 - {{ keyword }}歌曲免费在线听 - {{ SITE_NAME_ALT }}{% endblock %}
+{% block keywords %}{{ keyword }},{{ keyword }}搜索,{{ keyword }}歌曲,{{ keyword }}在线听,{{ keyword }}歌词,在线听音乐,免费听歌,在线听歌,免费音乐,{{ SITE_NAME_ALT }},{{ SITE_NAME }}{% endblock %}
+{% block description %}{{ SITE_BRAND }}搜索{{ keyword }}相关歌曲结果,提供{{ keyword }}歌曲免费在线听完整歌曲,无需登录、无需下载音乐软件即可在线播放,支持{{ keyword }}歌词同步滚动,还有{{ keyword }}好听的歌免费听。{% endblock %}
+{% block og_title %}{{ keyword }}搜索 - {{ keyword }}歌曲免费在线听 - {{ SITE_NAME_ALT }}{% endblock %}
+{% block og_description %}{{ SITE_BRAND }}搜索{{ keyword }}相关歌曲结果,提供{{ keyword }}歌曲免费在线听完整歌曲,免登录即可在线播放,支持歌词同步滚动。{% endblock %}
+{# 没有结果的搜索页是典型的薄内容页，被收录只会稀释站点质量 #}
+{% block robots %}{% if results %}index, follow{% else %}noindex, follow{% endif %}{% endblock %}
 
 {% block content %}
-<div class="main">
-    <div class="layui-container">
-        <!-- 搜索结果（原模块名：搜索结果） -->
-        <div class="bz-card">
-            <div class="bz-title">
-                <h1>搜索「{{ keyword }}」</h1>
-                {% if results %}<div class="pagedata">共 <span>{{ results|length }}</span> 条</div>{% endif %}
-            </div>
-            <div class="bz-song-list">
-                <ul>
-                    {% for song in results %}
-                    <li>
-                        <i class="snum">{{ forloop.counter }}</i>
-                        <div class="sname"><a href="{{ song.link }}" title="{{ song.title }}">{{ song.title }}</a></div>
-                        <span class="sico">
-                            <a href="javascript:;" class="bz-act bz-play-ico" title="播放"><i class="fa fa-play"></i></a>
-                            <a href="javascript:;" class="bz-act bz-add" title="加入播放列表"><i class="fa fa-plus"></i></a>
-                            <a href="javascript:;" class="bz-act bz-like" title="喜欢"><i class="fa fa-heart-o"></i></a>
-                        </span>
-                    </li>
-                    {% empty %}
-                    <div class="bz-empty"><i class="fa fa-search"></i>没有找到「{{ keyword }}」相关歌曲，换个关键词试试吧</div>
-                    {% endfor %}
-                </ul>
-            </div>
-            {% if pagination.links %}
-            <div class="bz-pager">
-                {% for link in pagination.links %}
-                <a class="{{ link.class }}" {% if link.href %}href="{{ link.href }}"{% endif %}>{{ link.text }}</a>
-                {% endfor %}
-            </div>
-            {% endif %}
-        </div>
+<div class="mx-auto w-full max-w-6xl px-4">
+
+    <div class="breadcrumbs pt-4 text-sm">
+        <ul><li><a href="/">首页</a></li><li>搜索</li><li>{{ keyword }}</li></ul>
     </div>
+
+    {# 搜索结果头部：关键词 + 命中数量；被屏蔽时给出专门的说明 #}
+    <section class="mt-2 rounded-box border border-base-300 bg-base-100 p-5">
+        <h1 class="text-xl font-bold">搜索「{{ keyword }}」</h1>
+        {% if blocked %}
+        <p class="mt-1 text-xs opacity-60">根据反馈，该关键词已做屏蔽处理，请换个关键词试试</p>
+        {% elif results %}
+        {# 总数直接采用源站自己报的「共有 N 首搜索结果」，不要用「页数 × 每页条数」估算 #}
+        <p class="mt-1 text-xs opacity-60">
+            {% if page > 1 %}第 {{ page }} 页 · {% endif %}{% if total_results %}共 {{ total_results }} 条相关歌曲{% else %}本页 {{ results|length }} 条相关歌曲{% endif %}
+        </p>
+        {% else %}
+        <p class="mt-1 text-xs opacity-60">没有匹配的结果</p>
+        {% endif %}
+    </section>
+
+    <section class="mt-4 rounded-box border border-base-300 bg-base-100 p-5">
+        {% if results %}
+        <ol class="gap-x-8 sm:columns-2 lg:columns-3">
+            {% for song in results %}
+            <li class="break-inside-avoid">
+                <a class="flex items-center gap-3 rounded-field px-2 py-2 transition hover:bg-base-200"
+                    href="{{ song.link }}" title="{{ song.title }}">
+                    <span class="w-6 shrink-0 text-right text-xs tabular-nums {% if forloop.counter <= 3 %}font-bold text-primary{% else %}opacity-45{% endif %}">{{ forloop.counter }}</span>
+                    <span class="truncate text-sm">{{ song.title }}</span>
+                </a>
+            </li>
+            {% endfor %}
+        </ol>
+        {% else %}
+        {% comment %}
+        空态必须放在列表容器之外：容器用的是 CSS 多列（columns-*）而不是 grid，
+        col-span-full 在里面完全不生效，空态会被挤进第一列。
+        {% endcomment %}
+        <div class="py-16 text-center opacity-50"><i class="fa fa-search fa-2x"></i>
+            <p class="mt-2 text-sm">
+                {% if blocked %}该关键词未能提供搜索结果{% else %}没有找到「{{ keyword }}」相关歌曲{% endif %}，换个关键词试试吧
+            </p>
+        </div>
+        {% endif %}
+
+        {% include 'common_html/pager.html' %}
+    </section>
 </div>
-{% include 'common_html/footer.html' %}
 {% endblock %}

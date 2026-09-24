@@ -8,7 +8,7 @@
 ├── .env                              # 环境变量(反爬凭证等,如 MUSIC_2T58_PHPSESSID)
 ├── BeiZiMusic/                       # Django 项目配置包
 │   ├── settings.py                   # INSTALLED_APPS 含 'Web.apps.WebConfig'
-│   │                                 # STATIC_ROOT = Web/static, MEDIA_ROOT = media
+│   │                                 # STATICFILES_DIRS = Web/static(直接对外服务), MEDIA_ROOT = media
 │   │                                 # TEMPLATES: APP_DIRS=True(模板从 app 目录加载)
 │   ├── urls.py                       # 根路由: path('', include('Web.views.urls'))
 │   │                                 #   + handler404/500 + 静态/媒体服务
@@ -31,8 +31,8 @@
 │   │   │   ├── footer.html           # 底部移动端导航
 │   │   │   └── friend_links.html     # 友情链接
 │   │   ├── index.html                # 首页
-│   │   ├── <功能>_list.html          # 列表页(如 singer_list.html / playtype_list.html)
-│   │   ├── <功能>.html               # 详情页(如 singer.html / playlist.html)
+│   │   ├── <功能>_list.html          # 列表页(如 singer_list.html / new_songs.html)
+│   │   ├── <功能>.html               # 详情页(如 singer.html / song.html)
 │   │   ├── 404.html / 500.html       # 错误页
 │   │   └── robots.txt
 │   └── views/

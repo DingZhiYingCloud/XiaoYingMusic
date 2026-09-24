@@ -1,10 +1,52 @@
-<header>
-    <div class="layui-container">
-        <a class="logo" href="/" title="杯子音乐网"><i class="fa fa-music" aria-hidden="true"></i>杯子音乐网</a>
-        <form class="search" method="get" action="/so.php?" target="so" name="post_new"
-            onsubmit="return CheckPost();">
-            <input type="text" name="wd" id="wd" class="seh_v" placeholder="输入关键字搜索">
-            <button class="seh_b" type="submit"><span class="fa fa-search"></span></button>
-        </form>
+<header class="sticky top-0 z-40 border-b border-base-300 bg-base-100/85 backdrop-blur">
+    <div class="navbar mx-auto w-full max-w-6xl gap-2 px-3 sm:px-4">
+
+        <div class="navbar-start gap-1">
+            {# 移动端：拉出侧边抽屉 #}
+            <label for="bz-drawer" class="btn btn-ghost btn-square lg:hidden" aria-label="打开菜单">
+                <i class="fa fa-bars"></i>
+            </label>
+            <a href="/" class="flex items-center gap-2" title="{{ SITE_NAME }}">
+                {% include 'common_html/logo_mark.html' with cls="h-9 w-9 shrink-0" %}
+                <span class="hidden text-lg font-bold tracking-wide sm:inline">{{ SITE_NAME }}</span>
+            </a>
+        </div>
+
+        {# 桌面端主导航：当前栏目由 common.js 按 URL 打上 menu-active #}
+        <nav class="navbar-center hidden lg:block">
+            <ul class="nav menu menu-horizontal gap-1 px-1">
+                <li><a href="/" data-nav="/"><i class="fa fa-home mr-1"></i>首页</a></li>
+                <li>
+                    <details>
+                        <summary><i class="fa fa-line-chart mr-1"></i>榜单</summary>
+                        <ul class="z-50 w-44 bg-base-100 p-2">
+                            <li><a href="/list/new.html" data-nav="/list/new.html">新声速递</a></li>
+                            <li><a href="/list/top.html" data-nav="/list/top.html">巅峰热榜</a></li>
+                            <li><a href="/list/djwuqu.html" data-nav="/list/djwuqu.html">律动电音集</a></li>
+                        </ul>
+                    </details>
+                </li>
+                <li><a href="/singerlist/index/index/index/index.html" data-nav="/singerlist/ /singer/"><i class="fa fa-user mr-1"></i>歌手</a></li>
+            </ul>
+        </nav>
+
+        <div class="navbar-end gap-1">
+            {% include 'common_html/search_box.html' with wide=1 %}
+            {# 主题切换：面板内容由 theme.js 注入到 [data-theme-menu] #}
+            <details class="dropdown dropdown-end">
+                <summary class="btn btn-ghost btn-sm gap-1" title="切换主题">
+                    <i class="fa fa-paint-brush"></i>
+                    <span class="hidden sm:inline">主题</span>
+                </summary>
+                <div data-theme-menu
+                    class="dropdown-content z-50 mt-3 flex max-h-[min(28rem,calc(100vh-9rem))] w-80 max-w-[calc(100vw-2rem)] flex-col rounded-box border border-base-300 bg-base-100 p-2.5 text-sm shadow-md">
+                </div>
+            </details>
+        </div>
+    </div>
+
+    {# 窄屏搜索：单独一行，避免与 logo、按钮挤在一行 #}
+    <div class="px-3 pb-3 md:hidden">
+        {% include 'common_html/search_box.html' %}
     </div>
 </header>

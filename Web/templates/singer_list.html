@@ -1,47 +1,41 @@
 {% extends 'template.html' %}
 
-{% block title %}{{ title }} - 免费音乐在线试听 - 爱听音乐网{% endblock %}
-{% block keywords %}歌手列表,歌手大全,华语歌手,欧美歌手,日韩歌手,免费音乐,在线听音乐,免费听歌,在线听歌,免登录听歌,{{ title }},爱听音乐网,杯子音乐网{% endblock %}
-{% block description %}爱听音乐网（杯子音乐网）{{ title }},提供华语、欧美、日韩等地区歌手分类列表,按性别、风格、字母筛选,找到您喜欢的歌手,全部歌曲免登录免费在线听完整歌曲,无需下载音乐软件。{% endblock %}
+{% block title %}{{ title }} - 免费音乐在线试听 - {{ SITE_NAME_ALT }}{% endblock %}
+{% block keywords %}歌手列表,歌手大全,华语歌手,欧美歌手,日韩歌手,全部歌手,免费音乐,在线听音乐,免费听歌,在线听歌,免登录听歌,{{ title }},{{ SITE_NAME_ALT }},{{ SITE_NAME }}{% endblock %}
+{% block description %}{{ SITE_BRAND }}{{ title }},收录华语、欧美、日韩等各地区歌手,按名字查找您喜欢的歌手,进入歌手页即可查看全部作品,歌曲免登录免费在线听完整歌曲,无需下载音乐软件。{% endblock %}
+{% block og_type %}profile{% endblock %}
+{% block og_title %}{{ title }} - 免费音乐在线试听 - {{ SITE_NAME_ALT }}{% endblock %}
+{% block og_description %}{{ SITE_BRAND }}{{ title }},收录华语、欧美、日韩等各地区歌手,全部歌曲免登录免费在线听。{% endblock %}
+{% block robots %}{% if singers %}index, follow{% else %}noindex, follow{% endif %}{% endblock %}
 
 {% block content %}
-<div class="main">
-    <div class="layui-container">
-        <!-- 歌手分类筛选条（原模块名：歌手分类筛选） -->
-        <div class="bz-filter">
-            {% for filter in filters %}
-            <li>
-                <span>{{ filter.label }}</span>
-                {% for option in filter.options %}
-                <a href="{{ option.link }}" {% if option.current %}class="current"{% endif %}>{{ option.title }}</a>
-                {% endfor %}
-            </li>
+<div class="mx-auto w-full max-w-6xl px-4">
+
+    <div class="breadcrumbs pt-4 text-sm">
+        <ul><li><a href="/">首页</a></li><li>歌手</li><li>{{ title }}</li></ul>
+    </div>
+
+    <section class="mt-4 rounded-box border border-base-300 bg-base-100 p-5">
+        <header class="mb-5 flex flex-wrap items-baseline gap-3 border-b border-base-300 pb-3">
+            <h1 class="text-xl font-bold">{{ title }}</h1>
+            <span class="text-xs opacity-60">共 {{ total }} 位歌手</span>
+        </header>
+
+        <div class="grid grid-cols-3 gap-x-3 gap-y-6 sm:grid-cols-5 lg:grid-cols-7 xl:grid-cols-8">
+            {% for singer in singers %}
+            <a class="group flex flex-col items-center gap-2" href="{{ singer.link }}" title="{{ singer.name }}">
+                <img src="{{ singer.pic }}" alt="{{ singer.name }}" loading="lazy"
+                    class="h-20 w-20 rounded-full object-cover ring-2 ring-base-300 transition group-hover:ring-primary group-hover:scale-105 sm:h-24 sm:w-24">
+                <span class="w-full truncate text-center text-sm opacity-80 group-hover:text-primary">{{ singer.name }}</span>
+            </a>
+            {% empty %}
+            <div class="col-span-full py-16 text-center opacity-50"><i class="fa fa-user fa-2x"></i>
+                <p class="mt-2 text-sm">暂无歌手数据，请稍后重试</p>
+            </div>
             {% endfor %}
         </div>
-        <!-- 歌手网格（原列表名：全部歌手列表） -->
-        <div class="bz-card bz-gap">
-            <div class="bz-title">
-                <h1>{{ title }}</h1>
-            </div>
-            <div class="bz-singers-grid">
-                {% for singer in singers %}
-                <div class="item">
-                    <div class="pic"><a href="{{ singer.link }}"><img src="{{ singer.pic }}" alt="{{ singer.name }}"></a></div>
-                    <a class="name" href="{{ singer.link }}" title="{{ singer.name }}">{{ singer.name }}</a>
-                </div>
-                {% empty %}
-                <div class="bz-empty"><i class="fa fa-user"></i>暂无歌手数据，请稍后重试</div>
-                {% endfor %}
-            </div>
-            {% if pagination.links %}
-            <div class="bz-pager">
-                {% for link in pagination.links %}
-                <a class="{{ link.class }}" {% if link.href %}href="{{ link.href }}"{% endif %}>{{ link.text }}</a>
-                {% endfor %}
-            </div>
-            {% endif %}
-        </div>
-    </div>
+
+        {% include 'common_html/pager.html' %}
+    </section>
 </div>
-{% include 'common_html/footer.html' %}
 {% endblock %}

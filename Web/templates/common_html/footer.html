@@ -1,30 +1,120 @@
-{% include 'common_html/friend_links.html' %}
+<footer class="mt-10 border-t border-base-300 bg-base-200">
+    <div class="mx-auto w-full max-w-6xl px-4 py-10">
+        {% comment %}
+        页脚栅格：三个导航始终保持横向并排，只有真放不下才换行。
+        窄屏（< lg）固定 3 列 —— nav 里的链接都很短（最长「律动电音集」5 个字），
+        375px 屏下每栏还有约 100px，放得下，所以不跳行；
+        品牌块那段说明文字窄栏里会挤成又高又窄的一条，用 col-span-3 占满整行。
+        到 lg 才收成 4 列，与原来一致（品牌 + 3 个导航同处一行）。
+        break-words 是给友情链接兜底的：外部站名可能是长英文串，栏变窄后不打断会撑破栅格。
+        {% endcomment %}
+        <div class="grid grid-cols-3 gap-x-4 gap-y-8 break-words sm:gap-x-6 lg:grid-cols-4 lg:gap-8">
 
-<footer class="lkpc">
-    <div class="layui-container">
-        <div class="desc">
-            <p>郑重声明：本站立足于美利坚合众国，受北美法律保护，请根据当地的法律法规访问本站。</p>
-            <p>免责声明：本站非营利性网站，所有数据自动收录,版权来自各网站,本站不提供任何音频存储和贩卖服务</p>
-            <p>若本站收录的歌曲无意侵犯了你的权益，请来信告知，我们会及时处理和回复！联系邮箱 3766849790#qq.com </p>
+            <div class="col-span-3 lg:col-span-1">
+                <div class="flex items-center gap-2">
+                    {% include 'common_html/logo_mark.html' with cls="h-9 w-9 shrink-0" %}
+                    <span class="text-lg font-bold">{{ SITE_NAME }}</span>
+                    <span class="badge badge-primary badge-sm">免费</span>
+                </div>
+                <p class="mt-3 max-w-md text-sm leading-relaxed opacity-70">
+                    {{ SITE_BRAND }}——免费音乐在线试听网站。免注册、免登录、免下载软件，打开网页即可在线听完整歌曲，
+                    支持歌词同步滚动。
+                </p>
+                {# 联系方式入口：点开三种联系方式，值全部来自 .env（见 Web/services/site_info.py） #}
+                <button type="button" id="bz-contact-open" class="btn btn-primary btn-sm mt-4">
+                    <i class="fa fa-comments-o"></i>联系我们
+                </button>
+            </div>
+
+            <nav>
+                <h2 class="footer-title mb-3 font-semibold opacity-60">发现音乐</h2>
+                <ul class="space-y-2 text-sm">
+                    <li><a class="link link-hover" href="/list/new.html">新声速递</a></li>
+                    <li><a class="link link-hover" href="/list/top.html">巅峰热榜</a></li>
+                </ul>
+            </nav>
+
+            <nav>
+                <h2 class="footer-title mb-3 font-semibold opacity-60">频道入口</h2>
+                <ul class="space-y-2 text-sm">
+                    <li><a class="link link-hover" href="/singerlist/index/index/index/index.html">歌手大全</a></li>
+                    <li><a class="link link-hover" href="/list/djwuqu.html">律动电音集</a></li>
+                    <li><a class="link link-hover" href="/">返回首页</a></li>
+                </ul>
+            </nav>
+
+            {% include 'common_html/friend_links.html' %}
+        </div>
+
+        <div class="mt-8 space-y-1 border-t border-base-300 pt-6 text-xs leading-relaxed opacity-60">
+            <p>郑重声明：本站是一个非商业的个人技术学习项目，不设会员、不插播广告、不开通付费内容；
+                站内不存储、也不出售任何音频文件，播放地址均由程序实时取自第三方公开来源，
+                本站不对第三方内容的可用性与合法性负责。</p>
+            <p>免责声明：站内音乐、歌词、封面等内容的著作权归原作者及唱片公司所有，
+                本站仅供个人试听与交流使用，请勿用于任何商业用途；喜欢请支持正版。</p>
+            <p>侵权处理：若本站收录的内容无意侵犯了你的权益，请来信告知 {{ SITE_CONTACT_EMAIL }}，
+                我们会尽快核实并处理。</p>
+            <p class="pt-2">&copy; {% now "Y" %} {{ SITE_NAME }} · 本站不存储任何音频文件</p>
         </div>
     </div>
 </footer>
 
-<div class="mfooter lkmobile">
-    <p>声明：本站不存储任何音频数据，站内歌曲来自搜索引擎，如有侵犯版权请及时联系我们，我们将在第一时间处理！</p>
-</div>
+{% comment %}
+「联系我们」弹窗：三种联系方式，值全部来自 .env（SITE_CONTACT_WECHAT / SITE_CONTACT_EMAIL /
+SITE_CONTACT_TG，见 Web/services/site_info.py），改联系方式不用动模板。
+用原生 <dialog> + showModal()，与歌曲页原来那个弹窗同一套写法，不引入任何第三方库。
+{% endcomment %}
+<dialog id="bz-contact-modal" class="modal">
+    <div class="modal-box">
+        <h3 class="flex items-center gap-2 text-lg font-bold">
+            <i class="fa fa-comments-o text-primary"></i>联系我们
+        </h3>
+        <p class="mt-1 text-xs opacity-60">三种方式任选其一，我们都会看到</p>
+        <ul class="mt-4 space-y-3 text-sm">
+            <li class="flex items-center gap-3">
+                <i class="fa fa-weixin w-5 shrink-0 text-center text-primary"></i>
+                <span class="shrink-0 opacity-60">微信</span>
+                <span class="break-words font-bold">{{ SITE_CONTACT_WECHAT }}</span>
+            </li>
+            <li class="flex items-center gap-3">
+                <i class="fa fa-envelope-o w-5 shrink-0 text-center text-primary"></i>
+                <span class="shrink-0 opacity-60">QQ 邮箱</span>
+                <span class="break-words font-bold">{{ SITE_CONTACT_EMAIL }}</span>
+            </li>
+            <li class="flex items-center gap-3">
+                <i class="fa fa-paper-plane-o w-5 shrink-0 text-center text-primary"></i>
+                <span class="shrink-0 opacity-60">Telegram</span>
+                <span class="break-words font-bold">{{ SITE_CONTACT_TG }}</span>
+            </li>
+        </ul>
+        {% if '#' in SITE_CONTACT_EMAIL %}
+        <p class="mt-3 text-xs opacity-50">邮箱里的 # 是防爬虫替换，发信时换成 @ 即可</p>
+        {% endif %}
+        <div class="modal-action">
+            <form method="dialog"><button class="btn btn-ghost btn-sm">关闭</button></form>
+        </div>
+    </div>
+    <form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
 
-<div class="fed-tabr-info fed-back-whits fed-min-width fed-line-top lkmobile">
-	<ul class="fed-part-rows">
-		<li class="fed-text-center"><a class="fed-visible" href="/"><i class="fed-icon-font fa fa-home"></i><span class="fed-font-xii">首页</span></a></li>
-		<!-- 原名称：排行 -->
-		<li class="fed-text-center"><a class="fed-visible" href="/list/top.html"><i class="fed-icon-font fa fa-line-chart"></i><span class="fed-font-xii">热榜</span></a></li>
-		<li class="fed-text-center"><a class="fed-visible" href="/playtype/index.html"><i class="fed-icon-font fa fa-music"></i><span class="fed-font-xii">歌单</span></a></li>
-		<li class="fed-text-center"><a class="fed-visible" href="/singerlist/index/index/index/index.html"><i class="fed-icon-font fa fa-user"></i><span class="fed-font-xii">歌手</span></a></li>
-		<!-- 原名称：MV -->
-		<li class="fed-text-center"><a class="fed-visible" href="/mvlist/index.html"><i class="fed-icon-font fa fa-video-camera"></i><span class="fed-font-xii">映像</span></a></li>
-			</ul>
-</div>
 <script>
-!function(p){"use strict";!function(t){var s=window,e=document,i=p,c="".concat("https:"===e.location.protocol?"https://":"http://","sdk.51.la/js-sdk-pro.min.js"),n=e.createElement("script"),r=e.getElementsByTagName("script")[0];n.type="text/javascript",n.setAttribute("charset","UTF-8"),n.async=!0,n.src=c,n.id="LA_COLLECT",i.d=n;var o=function(){s.LA.ids.push(i)};s.LA?s.LA.ids&&o():(s.LA=p,s.LA.ids=[],o()),r.parentNode.insertBefore(n,r)}()}({id:"3QisJxfuIZ0dJgUf",ck:"3QisJxfuIZ0dJgUf"});
+// 「联系我们」入口：本段脚本在弹窗之后，DOM 已解析完，直接绑定即可
+document.getElementById('bz-contact-open').addEventListener('click', function () {
+    document.getElementById('bz-contact-modal').showModal();
+});
 </script>
+
+{# 移动端底部导航（daisyUI dock）：当前项由 common.js 打上 dock-active #}
+<nav class="dock dock-sm z-40 border-t border-base-300 bg-base-100 lg:hidden">
+    <a href="/" data-nav="/"><i class="fa fa-home"></i><span class="dock-label">首页</span></a>
+    <a href="/list/top.html" data-nav="/list/"><i class="fa fa-fire"></i><span class="dock-label">热榜</span></a>
+    <a href="/singerlist/index/index/index/index.html" data-nav="/singerlist/ /singer/"><i class="fa fa-user"></i><span class="dock-label">歌手</span></a>
+</nav>
+
+{# 51.la 第三方统计：.env 配置 ANALYTICS_ID 后启用，留空则不输出 #}
+{# 二开者请换成自己的统计 ID，否则访问数据会混入原作者账号 #}
+{% if ANALYTICS_ID %}
+<script>
+!function(p){"use strict";!function(t){var s=window,e=document,i=p,c="".concat("https:"===e.location.protocol?"https://":"http://","sdk.51.la/js-sdk-pro.min.js"),n=e.createElement("script"),r=e.getElementsByTagName("script")[0];n.type="text/javascript",n.setAttribute("charset","UTF-8"),n.async=!0,n.src=c,n.id="LA_COLLECT",i.d=n;var o=function(){s.LA.ids.push(i)};s.LA?s.LA.ids&&o():(s.LA=p,s.LA.ids=[],o()),r.parentNode.insertBefore(n,r)}()}({id:"{{ ANALYTICS_ID }}",ck:"{{ ANALYTICS_ID }}"});
+</script>
+{% endif %}

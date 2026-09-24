@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="emerald">
 
 <head>
     <meta charset="UTF-8">
@@ -9,38 +9,42 @@
     <meta name="baidu-site-verification" content="codeva-D86XF7EVRs" />
     <meta name="viewport"
         content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0">
-    <title>{% block title %}免费音乐在线试听 - 在线听歌不用下载 - 爱听音乐网|杯子音乐网{% endblock %}</title>
-    <meta name="keywords" content="{% block keywords %}杯子音乐网,爱听音乐网,免费音乐,免费音乐网,在线听音乐,免费听歌,在线听歌,音乐在线播放,在线听歌网站,免登录听歌,无需注册听歌,不用下载的音乐网站,免费音乐在线听,免费音乐下载,MP3免费下载,Mp3歌曲免费下载,DJ舞曲,歌词下载,mp3下载,经典老歌{% endblock %}" />
-    <meta name="description" content="{% block description %}爱听音乐网（杯子音乐网）免费音乐在线试听网站,无需下载音乐软件、无需注册登录、无需付费,打开网页即可在线听完整歌曲。提供Mp3歌曲免费下载、DJ舞曲、歌词同步、MV视频在线观看,收录流行音乐、经典老歌、英文歌曲等海量免费音乐。{% endblock %}" />
-    <!-- 搜索引擎爬虫：允许收录与跟随链接 -->
-    <meta name="robots" content="index, follow" />
+    <title>{% block title %}免费音乐在线试听 - 在线听歌免登录 - {{ SITE_NAME_ALT }}|{{ SITE_NAME }}{% endblock %}</title>
+    <meta name="keywords" content="{% block keywords %}{{ SITE_NAME }},{{ SITE_NAME_ALT }},免费音乐,免费音乐网,在线听音乐,免费听歌,在线听歌,音乐在线播放,在线听歌网站,免登录听歌,无需注册听歌,不用下载软件的音乐网站,免费音乐在线听,完整版试听,歌词同步,DJ舞曲,经典老歌{% endblock %}" />
+    <meta name="description" content="{% block description %}{{ SITE_BRAND }}免费音乐在线试听网站,无需下载音乐软件、无需注册登录、无需付费,打开网页即可在线听完整歌曲。提供DJ舞曲、经典老歌、英文歌曲等海量免费音乐,支持歌词同步滚动。{% endblock %}" />
+    <!-- 搜索引擎爬虫：默认允许收录；数据为空（抓取失败）的页面可覆盖为 noindex, follow，避免收录薄内容页 -->
+    <meta name="robots" content="{% block robots %}index, follow{% endblock %}" />
     <!-- 规范链接：声明当前页面唯一权威地址，避免重复内容（分页/参数等）被拆分收录 -->
-    <link rel="canonical" href="{% block canonical %}{{ request.build_absolute_uri }}{% endblock %}" />
-    <!-- 移动端浏览器主题色 -->
-    <meta name="theme-color" content="#1677ff" />
-    <link rel="shortcut icon" href="/media/favicon.ico">
-    <link rel="bookmark" href="/media/favicon.ico">
+    {% comment %}
+    canonical 用 path 而不是 build_absolute_uri：后者会把 ?utm_source=xxx 之类的查询串一起带上，
+    同一篇文章就会因参数不同被搜索引擎当成多个不同地址。
+    {% endcomment %}
+    <link rel="canonical" href="{% block canonical %}{{ request.scheme }}://{{ request.get_host }}{{ request.path }}{% endblock %}" />
+    <!-- 移动端浏览器地址栏颜色：这里是 JS 未执行时的静态兜底值（emerald 主色）。
+         JS 运行后会跟着主题一起变，见 static/js/theme.js 的 updateThemeColor()。 -->
+    <meta name="theme-color" content="#66cc8a" />
+    {# 固定色 favicon：供搜索引擎抓取收录；JS 运行时会换成随主题变色的 SVG，但 HTML 源里始终是固定色文件 #}
+    <link rel="icon" id="bz-favicon" href="/media/favicon.ico">
     <!-- Open Graph 协议：社交平台（微信/QQ/微博等）分享时生成卡片，各页面可覆盖 block 定制 -->
-    <meta property="og:site_name" content="杯子音乐网" />
+    <meta property="og:site_name" content="{{ SITE_NAME }}" />
     <meta property="og:type" content="{% block og_type %}website{% endblock %}" />
-    <meta property="og:title" content="{% block og_title %}免费音乐在线试听 - 在线听歌不用下载 - 爱听音乐网|杯子音乐网{% endblock %}" />
-    <meta property="og:description" content="{% block og_description %}爱听音乐网（杯子音乐网）免费音乐在线试听网站,无需下载音乐软件、无需注册登录、无需付费,打开网页即可在线听完整歌曲。{% endblock %}" />
-    <meta property="og:url" content="{% block og_url %}{{ request.build_absolute_uri }}{% endblock %}" />
+    <meta property="og:title" content="{% block og_title %}免费音乐在线试听 - 在线听歌免登录 - {{ SITE_NAME_ALT }}|{{ SITE_NAME }}{% endblock %}" />
+    <meta property="og:description" content="{% block og_description %}{{ SITE_BRAND }}免费音乐在线试听网站,无需下载音乐软件、无需注册登录、无需付费,打开网页即可在线听完整歌曲,支持歌词同步滚动。{% endblock %}" />
+    <meta property="og:url" content="{% block og_url %}{{ request.scheme }}://{{ request.get_host }}{{ request.path }}{% endblock %}" />
     <meta property="og:image" content="{% block og_image %}{{ request.scheme }}://{{ request.get_host }}/static/images/logo.png{% endblock %}" />
     <meta property="og:locale" content="zh_CN" />
-    <!-- Twitter Card -->
+    <!-- Twitter Card：只保留 card 类型，标题/描述/图直接用上面的 og:*。
+         X（Twitter）在缺 twitter:* 时会回落到 og:*，两套并存只会多出
+         「改了 og 忘了改 twitter」的坑 —— 之前正是因为没人覆写它们，分享卡片全是首页文案。 -->
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="{% block twitter_title %}免费音乐在线试听 - 在线听歌不用下载 - 爱听音乐网|杯子音乐网{% endblock %}" />
-    <meta name="twitter:description" content="{% block twitter_description %}爱听音乐网（杯子音乐网）免费音乐在线试听网站,无需下载音乐软件、无需注册登录、无需付费,打开网页即可在线听完整歌曲。{% endblock %}" />
-    <meta name="twitter:image" content="{% block twitter_image %}{{ request.scheme }}://{{ request.get_host }}/static/images/logo.png{% endblock %}" />
     <!-- 结构化数据（schema.org）：声明站点信息与站内搜索，助力搜索引擎理解网站 -->
     <script type="application/ld+json">
     {
         "@context": "https://schema.org",
         "@type": "WebSite",
-        "name": "杯子音乐网",
+        "name": "{{ SITE_NAME }}",
         "url": "{{ request.scheme }}://{{ request.get_host }}/",
-        "description": "免费音乐下载网站，提供Mp3歌曲免费下载、DJ舞曲下载、歌词下载、MV视频在线观看。",
+        "description": "免费音乐在线试听网站，提供DJ舞曲、经典老歌、网络热门歌曲等海量免费音乐，支持歌词同步滚动。",
         "potentialAction": {
             "@type": "SearchAction",
             "target": "{{ request.scheme }}://{{ request.get_host }}/so/{search_term_string}.html",
@@ -48,75 +52,99 @@
         }
     }
     </script>
-    <link rel="stylesheet" href="/static/css/base.css?v=v2.12" />
-    <link rel="stylesheet" href="/static/layui/css/layui.min.css">
+    <!-- 全站样式：output.css 由 input.css 编译产出（Tailwind CSS + daisyUI），模板新增类名后需重编译 -->
+    {% comment %}
+    主题防闪烁 + 日期主题：必须在样式表之前执行。
+
+    「今日主题」由服务端按日期算好（Web/data/holidays.py + Web/services/holiday.py）：
+      · 节日 → 强制切换，且当天用户手动改过之后就不再干预
+      · 普通日子 → 只作为默认值兜底，用户自己选过就一直用用户的
+    这里只负责「今天是否已被处理过」的判定，判定结果存在 localStorage 的 bz_day_theme：
+      值形如 "2026-02-14|0"（0 = 系统强制，1 = 用户当天手动改过），日期不符即视为过期。
+
+    预览（URL 带 ?bz_preview=）走独立分支：只套用主题、不写任何标记，
+    所以看完预览不会污染真实用户的主题状态。
+    {% endcomment %}
+    <script>
+        (function () {
+            function localDay(d) {
+                var m = d.getMonth() + 1, day = d.getDate();
+                return d.getFullYear() + '-' + (m < 10 ? '0' : '') + m + '-' + (day < 10 ? '0' : '') + day;
+            }
+            var today = localDay(new Date());
+            var day = {
+                theme: '{{ DAY_THEME|escapejs }}',
+                holiday: {% if DAY_IS_HOLIDAY %}true{% else %}false{% endif %},
+                preview: {% if DAY_IS_PREVIEW %}true{% else %}false{% endif %}
+            };
+            window.BZ_TODAY = today;
+            window.BZ_DAY = day;
+
+            var KEY_DAY = 'bz_day_theme';
+            /* 供 theme.js 调用：标记「节日当天用户已手动改过主题」，当天不再强制拉回节日主题 */
+            window.BZ_markUserTheme = function () {
+                if (!day.holiday || day.preview) return;
+                try { localStorage.setItem(KEY_DAY, today + '|1'); } catch (e) { /* 隐私模式等忽略 */ }
+            };
+
+            var theme = day.theme;
+            try {
+                if (day.preview) {
+                    // 预览：只看效果，不写标记、不碰 localStorage
+                } else if (!day.holiday) {
+                    // 普通日子：清掉上一次节日的标记，季节主题只兜底
+                    localStorage.removeItem(KEY_DAY);
+                    theme = localStorage.getItem('bz_theme') || day.theme;
+                } else {
+                    var rec = localStorage.getItem(KEY_DAY) || '';
+                    // rec 形如 "2026-02-14|1"，前 10 位是日期，最后一位是「用户当天是否改过」
+                    var userPicked = rec.slice(0, 10) === today && rec.slice(-1) === '1';
+                    if (userPicked) {
+                        theme = localStorage.getItem('bz_theme') || day.theme;   // 用户当天改过 → 以用户为准
+                    } else {
+                        localStorage.setItem(KEY_DAY, today + '|0');            // 节日当天 → 强制
+                    }
+                }
+            } catch (e) { /* 隐私模式等忽略 */ }
+
+            if (theme) document.documentElement.setAttribute('data-theme', theme);
+        })();
+    </script>
+    <link rel="stylesheet" href="/static/css/output.css?v={{ STATIC_VERSION }}" />
     <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
-    <script src="/static/layui/js/layui.min.js"></script>
-    <script src="https://cdn.bootcdn.net/ajax/libs/jquery/3.7.1/jquery.min.js"></script>
-    <script src="/static/js/common.js?v=v2.2"></script>
+    {% comment %}
+    全站不再依赖 jQuery（各脚本已全部用原生 JS 实现）。
+    common.js 用 defer 加载：它要等 DOMContentLoaded 才做导航高亮，
+    defer 能避免阻塞 HTML 解析，又不改变执行时机。
+    {% endcomment %}
+    <script src="/static/js/common.js?v=v5" defer></script>
     {% block head %}{% endblock %}
 
 </head>
 
-<body>
-    {% include 'common_html/headers.html' %}
-    {% block content %}{% endblock %}
+<body class="bg-base-100 text-base-content">
+    {# 抽屉布局：桌面端用顶部导航，移动端由左上角按钮拉出侧边菜单 #}
+    {% comment %}
+    底部留白 pb-24 必须加在这个容器上（也就是**文档最末尾**），不能加在 <main> 上：
+    移动端底部 dock 是 fixed 定位，只有把留白留在文档末尾，滚到底时才顶得开它；
+    加在 main 上等于把 96px 留白留在文档中部，页脚最后一行仍会被 dock 压住。
+    {% endcomment %}
+    <div class="drawer">
+        <input id="bz-drawer" type="checkbox" class="drawer-toggle" />
 
-    <!-- 全局底部悬浮播放条（网易云 m-playbar 风格，全站固定；控制逻辑见 /static/js/player.js） -->
-    <div class="m-playbar m-playbar-unlock" id="m-playbar">
-        <a href="javascript:;" class="m-playbar-unlock-btn" id="m-btn-unlock" title="收起"><i class="fa fa-angle-down"></i></a>
-        <div class="m-playbar-wrap">
-            <!-- 左侧：封面 + 歌名/歌手 + 喜欢 -->
-            <div class="m-playbar-left">
-                <div class="m-playbar-cover"><img id="m-cover" src="" alt="封面" style="display:none;"></div>
-                <div class="m-playbar-info">
-                    <a class="m-playbar-name" id="m-song-name" href="javascript:;">暂无播放任务</a>
-                    <span class="m-playbar-artist" id="m-song-artist"></span>
-                </div>
-                <a href="javascript:;" class="m-playbar-like" id="m-btn-like" title="喜欢"><i class="fa fa-heart-o"></i></a>
-            </div>
-            <!-- 中部：播放控制 + 进度条 -->
-            <div class="m-playbar-center">
-                <div class="m-playbar-btns">
-                    <a href="javascript:;" class="m-btn-mode" id="m-btn-mode" title="列表循环"><i class="fa fa-repeat"></i><em class="m-mode-1">1</em></a>
-                    <a href="javascript:;" class="m-btn-prev" id="m-btn-prev" title="上一首"><i class="fa fa-step-backward"></i></a>
-                    <a href="javascript:;" class="m-btn-play jp-play" id="m-btn-play" title="播放"><i class="fa fa-play"></i></a>
-                    <a href="javascript:;" class="m-btn-pause jp-pause" id="m-btn-pause" title="暂停" style="display:none;"><i class="fa fa-pause"></i></a>
-                    <a href="javascript:;" class="m-btn-next" id="m-btn-next" title="下一首"><i class="fa fa-step-forward"></i></a>
-                    <a href="javascript:;" class="m-btn-list" id="m-btn-list" title="待播放列表"><i class="fa fa-list-ul"></i></a>
-                </div>
-                <div class="m-playbar-prog">
-                    <span class="m-time jp-current-time">00:00</span>
-                    <div class="jp-progress"><div class="jp-seek-bar"><div class="jp-play-bar"></div></div></div>
-                    <span class="m-time jp-duration">00:00</span>
-                </div>
-            </div>
-            <!-- 右侧：音量 -->
-            <div class="m-playbar-right">
-                <div class="m-playbar-vol">
-                    <a href="javascript:;" class="m-btn-rate" id="m-btn-rate" title="倍速播放">1x</a>
-                    <a href="javascript:;" class="jp-mute" title="静音"><i class="fa fa-volume-up"></i></a>
-                    <a href="javascript:;" class="jp-unmute" title="取消静音" style="display:none;"><i class="fa fa-volume-off"></i></a>
-                    <div class="jp-volume-bar"><div class="jp-volume-bar-value"></div></div>
-                </div>
-            </div>
+        <div class="drawer-content flex min-h-screen flex-col pb-24 lg:pb-0">
+            {% include 'common_html/headers.html' %}
+            {% include 'common_html/holiday_banner.html' %}
+            <main class="flex-1">{% block content %}{% endblock %}</main>
+            {% include 'common_html/footer.html' %}
         </div>
-        <!-- 待播放列表 / 我的喜欢 面板 -->
-        <div class="m-playlist" id="m-playlist" style="display:none;">
-            <div class="m-playlist-head">
-                <a href="javascript:;" class="m-tab active" data-tab="queue">待播放列表</a>
-                <a href="javascript:;" class="m-tab" data-tab="likes">我的喜欢</a>
-                <a href="javascript:;" class="m-playlist-clear" id="m-btn-clear">清空</a>
-            </div>
-            <ul class="m-playlist-body" id="m-playlist-body"></ul>
-        </div>
-        <div id="m-playbar-player" style="width:0;height:0;position:absolute;overflow:hidden;opacity:0;"></div>
+
+        {% include 'common_html/sidebar.html' %}
     </div>
-    <script src="/static/js/jplayer.min.js"></script>
-    <script src="/static/js/player.js?v=v9"></script>
 
+    {# 主题切换：面板由 theme.js 动态生成到 header 内的 [data-theme-menu] 容器 #}
+    <script src="/static/js/theme.js?v=v6"></script>
     {% block js %}{% endblock %}
-    
 </body>
 
 </html>

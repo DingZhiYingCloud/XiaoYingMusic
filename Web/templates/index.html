@@ -1,261 +1,150 @@
 {% extends 'template.html' %}
 
-{% block title %}免费音乐在线试听 - 在线听歌不用下载 - 爱听音乐网|杯子音乐网{% endblock %}
-{% block keywords %}杯子音乐网,爱听音乐网,免费音乐,免费音乐网,在线听音乐,免费听歌,在线听歌,音乐在线播放,在线听歌网站,免登录听歌,无需注册听歌,不用下载的音乐网站,免费音乐在线听,免费音乐下载,MP3免费下载,Mp3歌曲免费下载,DJ舞曲,网络热门歌曲,经典老歌,歌词下载,mp3下载{% endblock %}
-{% block description %}爱听音乐网（杯子音乐网）免费音乐在线试听网站,无需下载音乐软件、无需注册登录、无需付费,打开网页即可在线听完整歌曲。提供Mp3歌曲免费下载、DJ舞曲下载、歌词同步、MV视频在线观看,收录流行音乐、经典老歌、英文歌曲、网络热门歌曲等海量免费音乐。{% endblock %}
+{% block title %}免费音乐在线试听 - 在线听歌免登录 - {{ SITE_NAME_ALT }}|{{ SITE_NAME }}{% endblock %}
+{% block keywords %}{{ SITE_NAME }},{{ SITE_NAME_ALT }},免费音乐,免费音乐网,在线听音乐,免费听歌,在线听歌,音乐在线播放,在线听歌网站,免登录听歌,无需注册听歌,不用下载软件的音乐网站,免费音乐在线听,完整版试听,歌词同步,DJ舞曲,网络热门歌曲,经典老歌{% endblock %}
+{% block description %}{{ SITE_BRAND }}免费音乐在线试听网站,无需下载音乐软件、无需注册登录、无需付费,打开网页即可在线听完整歌曲。收录流行音乐、经典老歌、英文歌曲、网络热门歌曲等海量免费音乐,支持歌词同步滚动。{% endblock %}
+{% comment %}
+首页三块数据全部来自本地库（见 8.11），源站抓不抓得到都不影响它了 —— 原来那道
+"抓取源全空就别收录"的闸门因此失去了意义（源站挂了首页照样有内容）。
+改判本地库：歌手名册与曲目库都空，说明库还没建好（或刚清过表），这才是真正的空壳。
+{% endcomment %}
+{% block robots %}{% if hot_singers or random_songs %}index, follow{% else %}noindex, follow{% endif %}{% endblock %}
 
 {% block content %}
-<div class="main">
-    <div class="layui-container">
-        <!-- 页面主标题（SEO：全页唯一 h1，与顶部 logo 区分，保留核心关键词） -->
-        <h1 class="bz-home-title">免费音乐在线试听</h1>
-        <!-- 一、焦点图轮播（推荐歌单封面） -->
-        <div class="bz-banner" id="bzBanner">
-            <div class="bz-banner-track">
-                <a class="bz-banner-item" href="/playlist/ZG53dndrY2hraA.html"
-                    style="background-image:url('https://gimg3.baidu.com/gimg/app=2028&size=f170_130&fmt=auto&src=img1.kuwo.cn/star/userpl2015/73/76/1784608524302_504068773_500.jpg')">
-                    <div class="bz-banner-inner">
-                        <h2>Eason On Repeat｜可一可再，常听常在</h2>
-                        <p>经典粤语歌单精选，让你一次听个够</p>
-                        <span class="bz-banner-btn">立即试听</span>
-                    </div>
-                </a>
-                <a class="bz-banner-item" href="/playlist/ZHZzdmR2d3ZuaA.html"
-                    style="background-image:url('https://gimg3.baidu.com/gimg/app=2028&size=f170_130&fmt=auto&src=img1.kuwo.cn/star/userpl2015/76/62/1732158724091_139925276_500.jpg')">
-                    <div class="bz-banner-inner">
-                        <h2>经典粤语对唱丨用歌声演绎深情</h2>
-                        <p>百听不厌的粤语对唱，见证黄金年代的旋律</p>
-                        <span class="bz-banner-btn">立即试听</span>
-                    </div>
-                </a>
-                <a class="bz-banner-item" href="/playlist/ZGNkbW54Y3hzbQ.html"
-                    style="background-image:url('https://gimg3.baidu.com/gimg/app=2028&size=f170_130&fmt=auto&src=img1.kuwo.cn/star/userpl2015/18/32/1747724223257_626037818_500.jpg')">
-                    <div class="bz-banner-inner">
-                        <h2>经典老歌 | 有些人，错过就不在</h2>
-                        <p>一首老歌一段回忆，重温那些年我们单曲循环的旋律</p>
-                        <span class="bz-banner-btn">立即试听</span>
-                    </div>
-                </a>
-                <a class="bz-banner-item" href="/playlist/ZGNubm5tbnhraA.html"
-                    style="background-image:url('https://gimg3.baidu.com/gimg/app=2028&size=f170_130&fmt=auto&src=img1.kuwo.cn/star/userpl2015/85/22/1767253330366_224567985_500.jpg')">
-                    <div class="bz-banner-inner">
-                        <h2>回忆杀！林忆莲的金曲回响</h2>
-                        <p>天后的声音，唱尽都市人的爱与哀愁</p>
-                        <span class="bz-banner-btn">立即试听</span>
-                    </div>
-                </a>
-            </div>
-            <button class="bz-banner-nav bz-banner-prev" type="button">&#8249;</button>
-            <button class="bz-banner-nav bz-banner-next" type="button">&#8250;</button>
-            <div class="bz-banner-dots"></div>
-        </div>
+<div class="mx-auto w-full max-w-6xl px-4">
 
-        <!-- 二、热门歌手（原模块名：热门歌手） -->
-        <div class="layui-row lkbj bz-block">
-            <div class="lktitle">
-                <a href="/singerlist/index/index/index/index.html">
-                    <h2>星芒歌手</h2>
-                </a>
-            </div>
-            <div class="lksinger_list bz-singers">
-                <ul>
-                    {% for singer in hot_singers %}
-                    <li{% if forloop.counter > 6 %} class="hide-wap"{% endif %}>
-                        <div class="pic"><a href="{{ singer.link }}" title="{{ singer.name }}"><img
-                                    src="{{ singer.pic }}" height=75 width=75 alt="{{ singer.name }}"></a></div>
-                        <div class="name"><a href="{{ singer.link }}" title="{{ singer.name }}">{{ singer.name }}</a></div>
-                    </li>
-                    {% endfor %}
-                </ul>
-            </div>
-        </div>
-
-        <!-- 三、双栏榜单：歌曲飙升榜 + 流行趋势榜（原模块名：歌曲飙升榜 / 流行趋势榜） -->
-        <div class="bz-chart-grid">
-            <div class="bz-chart-card">
-                <div class="bz-chart-head">
-                    <h2>破浪热曲</h2>
-                    <span class="pagedata">更新时间：<span>{% now "Y-m-d" %}</span></span>
-                    <a class="more" href="/list/new.html">更多 &#8250;</a>
-                </div>
-                <ol class="bz-chart-ol">
-                    {% for song in rising_songs|slice:":10" %}
-                    <li>
-                        <i class="num">{{ forloop.counter }}</i>
-                        <a href="{{ song.link }}" title="{{ song.title }}">{{ song.title }}</a>
-                        <span class="bz-chart-act">
-                            <a href="javascript:;" class="bz-act bz-add" title="加入播放列表"><i class="fa fa-plus"></i></a>
-                            <a href="javascript:;" class="bz-act bz-like" title="喜欢"><i class="fa fa-heart-o"></i></a>
-                        </span>
-                    </li>
-                    {% endfor %}
-                </ol>
-            </div>
-            <div class="bz-chart-card">
-                <div class="bz-chart-head">
-                    <h2>流行脉搏</h2>
-                    <a class="more" href="/list/djwuqu.html">更多 &#8250;</a>
-                </div>
-                <ol class="bz-chart-ol">
-                    {% for song in trending_songs|slice:":10" %}
-                    <li>
-                        <i class="num">{{ forloop.counter }}</i>
-                        <a href="{{ song.link }}" title="{{ song.title }}">{{ song.title }}</a>
-                        <span class="bz-chart-act">
-                            <a href="javascript:;" class="bz-act bz-add" title="加入播放列表"><i class="fa fa-plus"></i></a>
-                            <a href="javascript:;" class="bz-act bz-like" title="喜欢"><i class="fa fa-heart-o"></i></a>
-                        </span>
-                    </li>
-                    {% endfor %}
-                </ol>
-            </div>
-        </div>
-
-        <!-- 四、推荐歌单（原模块名：推荐歌单） -->
-        <div class="layui-row lkbj bz-block">
-            <div class="lktitle">
-                <a href="/playtype/index.html">
-                    <h2>拾光歌单</h2>
-                </a>
-                <a class="more" href="/playtype/index.html">更多 &#8250;</a>
-            </div>
-            <div class="bz-playlists">
-                <div class="bz-play-item">
-                    <div class="pic"><a href="/playlist/ZG53dndrY2hraA.html"
-                            title="Eason On Repeat｜可一可再，常听常在"><img
-                                src="https://gimg3.baidu.com/gimg/app=2028&size=f170_130&fmt=auto&src=img1.kuwo.cn/star/userpl2015/73/76/1784608524302_504068773_500.jpg" alt="Eason On Repeat｜可一可再，常听常在"></a>
-                        <span class="play-ico"><i class="fa fa-play"></i></span>
-                    </div>
-                    <a class="name" href="/playlist/ZG53dndrY2hraA.html" title="Eason On Repeat｜可一可再，常听常在"
-                       >Eason On Repeat｜可一可再，常听常在</a>
-                </div>
-                <div class="bz-play-item">
-                    <div class="pic"><a href="/playlist/ZHZzdmR2d3ZuaA.html"
-                            title="经典粤语对唱丨用歌声演绎深情"><img
-                                src="https://gimg3.baidu.com/gimg/app=2028&size=f170_130&fmt=auto&src=img1.kuwo.cn/star/userpl2015/76/62/1732158724091_139925276_500.jpg" alt="经典粤语对唱丨用歌声演绎深情"></a>
-                        <span class="play-ico"><i class="fa fa-play"></i></span>
-                    </div>
-                    <a class="name" href="/playlist/ZHZzdmR2d3ZuaA.html" title="经典粤语对唱丨用歌声演绎深情"
-                       >经典粤语对唱丨用歌声演绎深情</a>
-                </div>
-                <div class="bz-play-item">
-                    <div class="pic"><a href="/playlist/ZGNkbW54Y3hzbQ.html"
-                            title="经典老歌 | 有些人，错过就不在"><img
-                                src="https://gimg3.baidu.com/gimg/app=2028&size=f170_130&fmt=auto&src=img1.kuwo.cn/star/userpl2015/18/32/1747724223257_626037818_500.jpg" alt="经典老歌 | 有些人，错过就不在"></a>
-                        <span class="play-ico"><i class="fa fa-play"></i></span>
-                    </div>
-                    <a class="name" href="/playlist/ZGNkbW54Y3hzbQ.html" title="经典老歌 | 有些人，错过就不在"
-                       >经典老歌 | 有些人，错过就不在</a>
-                </div>
-                <div class="bz-play-item">
-                    <div class="pic"><a href="/playlist/ZGNubm5tbnhraA.html" title="回忆杀！林忆莲的金曲回响"><img
-                                src="https://gimg3.baidu.com/gimg/app=2028&size=f170_130&fmt=auto&src=img1.kuwo.cn/star/userpl2015/85/22/1767253330366_224567985_500.jpg" alt="回忆杀！林忆莲的金曲回响"></a>
-                        <span class="play-ico"><i class="fa fa-play"></i></span>
-                    </div>
-                    <a class="name" href="/playlist/ZGNubm5tbnhraA.html" title="回忆杀！林忆莲的金曲回响"
-                       >回忆杀！林忆莲的金曲回响</a>
-                </div>
-                <div class="bz-play-item">
-                    <div class="pic"><a href="/playlist/ZHZka3duZHhtaw.html"
-                            title="经典老歌30首丨经久源远，回忆重演"><img
-                                src="https://gimg3.baidu.com/gimg/app=2028&size=f170_130&fmt=auto&src=img1.kuwo.cn/star/userpl2015/53/83/1710637999289_562026053_500.jpg" alt="经典老歌30首丨经久源远，回忆重演"></a>
-                        <span class="play-ico"><i class="fa fa-play"></i></span>
-                    </div>
-                    <a class="name" href="/playlist/ZHZka3duZHhtaw.html" title="经典老歌30首丨经久源远，回忆重演"
-                       >经典老歌30首丨经久源远，回忆重演</a>
-                </div>
-                <div class="bz-play-item">
-                    <div class="pic"><a href="/playlist/ZGNud3hoY3hodg.html"
-                            title="华语经典：黑胶里的派对金曲"><img
-                                src="https://gimg3.baidu.com/gimg/app=2028&size=f170_130&fmt=auto&src=img1.kuwo.cn/star/userpl2015/71/59/1764927904442_499998371_500.jpg" alt="华语经典：黑胶里的派对金曲"></a>
-                        <span class="play-ico"><i class="fa fa-play"></i></span>
-                    </div>
-                    <a class="name" href="/playlist/ZGNud3hoY3hodg.html" title="华语经典：黑胶里的派对金曲"
-                       >华语经典：黑胶里的派对金曲</a>
-                </div>
-                <div class="bz-play-item hide-wap">
-                    <div class="pic"><a href="/playlist/ZHZudm5jY3h4Yw.html"
-                            title="短视频DJ热门歌曲｜网红BGM"><img
-                                src="https://gimg3.baidu.com/gimg/app=2028&size=f170_130&fmt=auto&src=img1.kuwo.cn/star/userpl2015/25/94/1725873340689_174039025_500.jpg" alt="短视频DJ热门歌曲｜网红BGM"></a>
-                        <span class="play-ico"><i class="fa fa-play"></i></span>
-                    </div>
-                    <a class="name" href="/playlist/ZHZudm5jY3h4Yw.html" title="短视频DJ热门歌曲｜网红BGM"
-                       >短视频DJ热门歌曲｜网红BGM</a>
-                </div>
-                <div class="bz-play-item hide-wap">
-                    <div class="pic"><a href="/playlist/ZGNoa2todnNrcw.html"
-                            title="2026短视频热门歌曲合集【精选】"><img
-                                src="https://gimg3.baidu.com/gimg/app=2028&size=f170_130&fmt=auto&src=img1.kuwo.cn/star/userpl2015/23/76/1768379343889_135259123_500.jpg" alt="2026短视频热门歌曲合集【精选】"></a>
-                        <span class="play-ico"><i class="fa fa-play"></i></span>
-                    </div>
-                    <a class="name" href="/playlist/ZGNoa2todnNrcw.html" title="2026短视频热门歌曲合集【精选】"
-                       >2026短视频热门歌曲合集【精选】</a>
-                </div>
-                <div class="bz-play-item hide-wap">
-                    <div class="pic"><a href="/playlist/ZGNueHdzeG5uaw.html"
-                            title="翻唱经典集｜一起重返学生时代"><img
-                                src="https://gimg3.baidu.com/gimg/app=2028&size=f170_130&fmt=auto&src=img1.kuwo.cn/star/userpl2015/98/66/1765771556668_577097598_500.jpg" alt="翻唱经典集｜一起重返学生时代"></a>
-                        <span class="play-ico"><i class="fa fa-play"></i></span>
-                    </div>
-                    <a class="name" href="/playlist/ZGNueHdzeG5uaw.html" title="翻唱经典集｜一起重返学生时代"
-                       >翻唱经典集｜一起重返学生时代</a>
-                </div>
-                <div class="bz-play-item hide-wap">
-                    <div class="pic"><a href="/playlist/ZHZzY254ZGtkbg.html"
-                            title="英文流行｜好听又治愈的欧美歌曲"><img
-                                src="https://gimg3.baidu.com/gimg/app=2028&size=f170_130&fmt=auto&src=img1.kuwo.cn/star/userpl2015/25/94/1732692064935_174039025_500.jpg" alt="英文流行｜好听又治愈的欧美歌曲"></a>
-                        <span class="play-ico"><i class="fa fa-play"></i></span>
-                    </div>
-                    <a class="name" href="/playlist/ZHZzY254ZGtkbg.html" title="英文流行｜好听又治愈的欧美歌曲"
-                       >英文流行｜好听又治愈的欧美歌曲</a>
-                </div>
-            </div>
-        </div>
-
-        <!-- 五、网站介绍（SEO 内容区：自然描述网站服务，覆盖"在线听歌/免登录/免下载"搜索意图） -->
-        <div class="bz-seo-text">
-            <h2>免费音乐在线听，无需下载音乐软件</h2>
-            <p>爱听音乐网（杯子音乐网）是一个免费音乐在线试听网站，无需注册登录、无需下载任何音乐软件、无需付费，打开网页即可在线听完整歌曲。网站收录流行音乐、经典老歌、DJ舞曲、英文歌曲、网络热门歌曲等海量免费音乐，支持歌词同步显示与MV高清在线观看，随时随地想听就听，是你免费在线听歌的好选择。</p>
-        </div>
+    {# 页面主标题（SEO：全页唯一 h1，保留"免费音乐在线试听"核心关键词） #}
+    <div class="mt-6 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <h1 class="text-2xl font-bold">免费音乐在线试听</h1>
+        <span class="badge badge-primary badge-sm">100% 免费 · 无需登录</span>
     </div>
+    <p class="mt-2 text-sm leading-relaxed opacity-70">
+        {{ SITE_BRAND }}——不用下载音乐软件、不用注册登录，打开网页就能听完整歌曲，歌词同步滚动。
+    </p>
+
+    {# ===== 频道入口：两张等宽卡片，与顶部导航互补 ===== #}
+    <section class="mt-4 grid grid-cols-2 gap-3">
+        <a href="/list/top.html" class="card card-border bg-base-100 transition hover:-translate-y-0.5 hover:shadow-md">
+            <div class="card-body items-center gap-1 p-4 text-center">
+                <i class="fa fa-fire fa-2x text-primary"></i>
+                <span class="font-semibold">巅峰热榜</span>
+                <span class="text-xs opacity-60">看大家在听什么</span>
+            </div>
+        </a>
+        <a href="/singerlist/index/index/index/index.html" class="card card-border bg-base-100 transition hover:-translate-y-0.5 hover:shadow-md">
+            <div class="card-body items-center gap-1 p-4 text-center">
+                <i class="fa fa-user fa-2x text-primary"></i>
+                <span class="font-semibold">歌手大全</span>
+                <span class="text-xs opacity-60">2 万+ 位歌手的全部作品</span>
+            </div>
+        </a>
+    </section>
+
+    {# ===== 今日推荐：主卡内嵌三个子模块（歌手墙 + 两档榜单），bento 式非对称排布 ===== #}
+    <section class="mt-8 overflow-hidden rounded-box border border-base-300 bg-base-100 shadow-sm">
+        <div class="flex flex-wrap items-center gap-3 border-b border-base-300 bg-base-200/60 px-5 py-4">
+            <h2 class="text-xl font-bold">今日推荐</h2>
+            <span class="badge badge-primary badge-sm">每天都有好歌等你</span>
+            <a class="link link-hover ml-auto text-sm" href="/singerlist/index/index/index/index.html">更多歌手 &#8250;</a>
+        </div>
+
+        {% comment %}
+        min-w-0 是下面三个子模块的必需项，别删：网格项的自动最小尺寸默认取 min-content，
+        而里面的 truncate（white-space:nowrap）遇到长歌名/长名字就会把所在列撑宽 ——
+        <lg 时只有一列 auto，整列撑破卡片后被 section 的 overflow-hidden 裁掉，
+        连省略号都来不及出现。给网格项写死 min-width:0 后自动最小尺寸归零，truncate 才能正常收尾。
+        {% endcomment %}
+        <div class="grid gap-5 p-5 lg:grid-cols-12">
+            {# 子模块一：歌手墙（本地歌手库的前 24 位，密集头像网格，占主位） #}
+            <div class="min-w-0 lg:col-span-7 xl:col-span-8">
+                <h3 class="mb-3 flex items-center gap-2 text-sm font-semibold opacity-70">
+                    <i class="fa fa-users text-primary"></i>歌手推荐
+                </h3>
+                <div class="grid grid-cols-4 gap-x-2 gap-y-4 sm:grid-cols-6 xl:grid-cols-8">
+                    {% for singer in hot_singers %}
+                    <a class="group flex flex-col items-center gap-1.5" href="{{ singer.link }}" title="{{ singer.name }}">
+                        <img src="{{ singer.pic }}" alt="{{ singer.name }}" loading="lazy"
+                            class="h-14 w-14 rounded-full object-cover ring-2 ring-base-300 transition group-hover:ring-primary sm:h-16 sm:w-16">
+                        <span class="w-full truncate text-center text-xs opacity-80 group-hover:text-primary">{{ singer.name }}</span>
+                    </a>
+                    {% empty %}
+                    <div class="col-span-full py-10 text-center opacity-50"><i class="fa fa-user fa-2x"></i>
+                        <p class="mt-2 text-sm">暂无歌手数据</p>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+
+            {# 子模块二：今日热听榜（今日被整首听完次数最多的几首，见 Web/services/play_rank.py） #}
+            <div class="min-w-0 lg:col-span-5 xl:col-span-4">
+                <h3 class="mb-3 flex items-center gap-2 text-sm font-semibold opacity-70">
+                    <i class="fa fa-fire text-primary"></i>今日热听榜
+                </h3>
+                <ol class="space-y-1">
+                    {# 条数上限由 PLAY_RANK_COUNT 控制，不在模板里再截一次，免得两处数字对不上 #}
+                    {% for song in rising_songs %}
+                    <li>
+                        <a class="flex items-center gap-3 rounded-field px-2 py-1.5 transition hover:bg-base-200"
+                            href="{{ song.link }}" title="{{ song.title }}">
+                            <span class="badge badge-sm w-6 shrink-0 border-0 {% if forloop.counter <= 3 %}badge-primary{% else %}bg-base-300 text-base-content/70{% endif %}">{{ forloop.counter }}</span>
+                            <span class="truncate text-sm">{{ song.title }}</span>
+                        </a>
+                    </li>
+                    {% empty %}
+                    {% comment %}
+                        图标大小必须用 FA 自带的 fa-2x：Tailwind 的 text-3xl 等字号类对 .fa 无效
+                        （FA 的 .fa 是无层级样式，永远压过 Tailwind 的 @layer utilities）。
+                        这段注释本身也必须用 comment 标签而不能用单行注释语法 —— 单行注释
+                        只支持一行，跨行写会把注释当正文渲染到页面上（见 README FAQ）。
+                    {% endcomment %}
+                    <li class="py-10 text-center opacity-50"><i class="fa fa-music fa-2x"></i>
+                        <p class="mt-2 text-sm">暂无数据</p>
+                    </li>
+                    {% endfor %}
+                </ol>
+            </div>
+
+            {# 子模块三：随机点唱机（横向通栏，双列瀑布排布）；数据来自本地曲目库，见 singer_library.random_songs #}
+            <div class="min-w-0 lg:col-span-12">
+                <h3 class="mb-3 flex flex-wrap items-center gap-2 text-sm font-semibold opacity-70">
+                    <i class="fa fa-random text-primary"></i>随机点唱机
+                    <span class="text-xs font-normal opacity-60">从曲库随机抽取，定期换一批</span>
+                </h3>
+                {% if random_songs %}
+                {# 显示几首由 RANDOM_PICK_COUNT 控制，不在模板里再截一次，免得两处数字对不上 #}
+                <ol class="gap-x-8 sm:columns-2 lg:columns-3">
+                    {% for song in random_songs %}
+                    <li class="break-inside-avoid">
+                        <a class="flex items-center gap-3 rounded-field px-2 py-1.5 transition hover:bg-base-200"
+                            href="{{ song.link }}" title="{{ song.title }}">
+                            <span class="w-5 shrink-0 text-right text-xs tabular-nums opacity-50">{{ forloop.counter }}</span>
+                            <span class="truncate text-sm">{{ song.title }}</span>
+                        </a>
+                    </li>
+                    {% endfor %}
+                </ol>
+                {% else %}
+                {% comment %}
+                空态必须放在列表容器之外：容器用的是 CSS 多列（columns-*）而不是 grid，
+                col-span-full 在里面完全不生效，空态会被挤进第一列。
+                {% endcomment %}
+                <div class="py-10 text-center opacity-50"><i class="fa fa-random fa-2x"></i>
+                    <p class="mt-2 text-sm">暂无数据</p>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </section>
+
+    {# 网站介绍（SEO 内容区：自然描述服务，覆盖"在线听歌/免登录/免下载软件"搜索意图）#}
+    <section class="mt-8 rounded-box border border-base-300 bg-base-100 p-5 sm:p-6">
+        <h2 class="text-lg font-bold">免费音乐在线听，无需下载音乐软件</h2>
+        <p class="mt-3 text-sm leading-7 opacity-75">
+            {{ SITE_BRAND }}是一个免费音乐在线试听网站，无需注册登录、无需下载任何音乐软件、无需付费，打开网页即可在线听完整歌曲。
+            网站收录流行音乐、经典老歌、DJ舞曲、英文歌曲、网络热门歌曲等海量免费音乐，支持歌词同步滚动显示，
+            随时随地想听就听，是你免费在线听歌的好选择。
+        </p>
+    </section>
+
 </div>
-{% include 'common_html/footer.html' %}
-
-{% endblock %}
-{% block js %}
-<script>
-// 首页焦点图轮播：自动播放 + 箭头/指示点切换
-(function ($) {
-    var $banner = $('#bzBanner');
-    if (!$banner.length) return;
-    var $track = $banner.find('.bz-banner-track');
-    var $items = $track.find('.bz-banner-item');
-    var count = $items.length;
-    if (count < 2) return;
-    var idx = 0, timer = null;
-    var $dots = $banner.find('.bz-banner-dots');
-
-    // 生成指示点
-    $items.each(function (i) {
-        $dots.append('<i data-i="' + i + '"></i>');
-    });
-
-    function show(i) {
-        idx = (i + count) % count;
-        $track.css('transform', 'translateX(-' + (idx * 100) + '%)');
-        $dots.find('i').removeClass('on').eq(idx).addClass('on');
-    }
-
-    function play() { timer = setInterval(function () { show(idx + 1); }, 4000); }
-    function stop() { if (timer) { clearInterval(timer); timer = null; } }
-
-    $banner.find('.bz-banner-next').on('click', function () { stop(); show(idx + 1); play(); });
-    $banner.find('.bz-banner-prev').on('click', function () { stop(); show(idx - 1); play(); });
-    $dots.on('click', 'i', function () { stop(); show(+$(this).data('i')); play(); });
-    $banner.on('mouseenter', stop).on('mouseleave', play);
-
-    show(0);
-    play();
-})(jQuery);
-</script>
 {% endblock %}

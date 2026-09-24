@@ -1,6 +1,10 @@
-lxml
-Django 
-django-cors-headers 
-requests 
-pycryptodome
-python-dotenv 
+# 依赖版本按「作者本机实测通过」锁死，保证服务器装出来和本地完全一致。
+# 本机环境：Python 3.14.5（Django 6.1 要求 Python >= 3.12，服务器务必用 3.12+）
+Django==6.1
+django-cors-headers==4.9.0
+lxml==6.1.1
+requests==2.34.2
+pycryptodome==3.23.0
+python-dotenv==1.2.2
+# 注意：应用服务器 uWSGI **不在**这里 —— 它在 Windows 上编译不过，
+# 只在 Linux 服务器上单独安装：pip install uwsgi（见 README 第十三章）

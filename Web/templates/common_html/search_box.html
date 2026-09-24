@@ -1,0 +1,43 @@
+{% comment %}
+搜索框 + 热门搜索下拉（header 里桌面端与窄屏共用）
+
+参数：
+  wide=1  桌面端用：固定宽度、窄屏隐藏（header 主行空间紧张）
+  不传    占满父容器宽度（窄屏单独一行时用）
+
+下拉靠纯 CSS 实现，不需要 JS：焦点进入表单（focus-within）时把 max-height/opacity
+过渡开，焦点离开再收回去。所以没有"点空白处关闭"的问题，也不会和 common.js
+里那套"点外部收起 details"的逻辑打架。
+
+注意：这里必须用 comment 标签而不是 {# #} —— Django 的 {# #} 只支持单行，
+跨行写的话整段注释会被当成正文渲染到页面上。
+{% endcomment %}
+<form class="group relative {% if wide %}hidden w-56 md:block{% else %}w-full{% endif %}"
+    autocomplete="off" onsubmit="return bzSearch(this);">
+    <label class="input input-sm w-full items-center gap-2 rounded-full">
+        <i class="fa fa-search opacity-50"></i>
+        {# autocomplete="off"：关掉浏览器自带的「以前搜过什么」历史下拉，否则它会盖住我们的热门搜索下拉（表单和输入框都要写，只写一个浏览器可能不听） #}
+        {# maxlength：最多输 SEARCH_KEYWORD_MAX_CHARS 个字符（.env 可配）。它只拦得住正常打字，手敲超长 URL 依然能进来，所以后端也按同一个值截断 #}
+        <input type="text" name="wd" class="grow" placeholder="搜索歌曲 / 歌手"
+            autocomplete="off" maxlength="{{ SEARCH_KEYWORD_MAX_CHARS }}" />
+    </label>
+
+    {% if HOT_KEYWORDS %}
+    <div class="invisible absolute left-0 right-0 top-full z-50 mt-2 max-h-0 overflow-hidden
+                rounded-box border border-base-300 bg-base-100 opacity-0 shadow-md
+                transition-all duration-200 ease-out
+                group-focus-within:visible group-focus-within:max-h-80 group-focus-within:opacity-100">
+        <p class="px-3 pt-2 text-xs opacity-60">热门搜索</p>
+        <ul class="menu menu-sm w-full flex-nowrap p-2 pt-1">
+            {% for word in HOT_KEYWORDS %}
+            <li>
+                <a href="/so/{{ word|urlencode }}.html" title="{{ word }}">
+                    <span class="w-4 shrink-0 text-right text-xs tabular-nums opacity-45">{{ forloop.counter }}</span>
+                    <span class="truncate">{{ word }}</span>
+                </a>
+            </li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+</form>

@@ -1,0 +1,120 @@
+/* ============================================================
+ * Tailwind CSS 4 + daisyUI 5 编译入口（源文件）
+ * ------------------------------------------------------------
+ * 编译命令（在项目根目录执行）：
+ *   Web/static-src/css/tailwindcss.exe -i Web/static-src/css/input.css -o Web/static/css/output.css
+ * 开发时加 --watch，改动模板类名后自动重编译。
+ *
+ * 为什么源文件不放在 Web/static/css/ 下：
+ *   那个目录是**对外服务的静态目录**（/static/ 直接把它暴露给公网），
+ *   放这里会把 107MB 的 tailwindcss.exe、CSS 源码和主题脚本一起暴露出去，
+ *   别人一个 GET /static/css/tailwindcss.exe 就能拖走整个编译器。
+ *
+ * 注意：模板里新增 Tailwind/daisyUI 类名后必须重编译，output.css 才会包含新类名
+ *       （与 Django 的 autoreload 无关）。
+ * ============================================================ */
+
+/* source(none) 关闭自动扫描。
+ * 原因：源文件目录里躺着 107MB 的 tailwindcss.exe，开启自动扫描会把它当源码解析。 */
+@import "tailwindcss" source(none);
+
+/* 唯一的类名来源：Django 模板目录（相对本文件路径） */
+@source "../../templates";
+
+/* common.js / theme.js 里会运行时挂上 menu-active / dock-active 等 daisyUI 状态类，
+ * 并动态创建 toast/alert 与主题面板节点，这些类名不在模板里，需一并扫描才生成样式。 */
+@source "../../static/js/common.js";
+@source "../../static/js/theme.js";
+
+/* 主题：启用 daisyUI 全部内置主题，供页头「主题」下拉自由切换（做法与小影 API 一致）。
+ * 默认档不再是固定值，而由日期决定（节日主题 / 季节兜底，见 settings.py 的
+ * HOLIDAY_THEMES、SEASON_THEMES），页头选择结果存 localStorage 持久化。 */
+@plugin "./daisyui.mjs" {
+  themes: all;
+  logs: false;
+}
+
+/* ============ 输入类控件的聚焦效果 ============
+ * daisyUI 默认聚焦为「2px 实线 outline + 2px offset」，颜色取文本色（深色），视觉偏重。
+ * 这里统一换成「主色细描边 + 3px 半透明柔光」：轻盈，但仍清晰可见。
+ * 保留 transparent outline：Windows 高对比度模式会自动显形，兼顾无障碍。
+ * 语法依据 daisyUI 官方推荐的 @utility 覆写组件方式。 */
+@utility input {
+  &:focus,
+  &:focus-within {
+    --input-color: var(--color-primary);
+    border-color: var(--color-primary);
+    outline: 2px solid transparent;
+    outline-offset: 2px;
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-primary) 20%, transparent);
+  }
+}
+
+@utility select {
+  &:focus,
+  &:focus-within {
+    --input-color: var(--color-primary);
+    border-color: var(--color-primary);
+    outline: 2px solid transparent;
+    outline-offset: 2px;
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-primary) 20%, transparent);
+  }
+}
+
+@utility textarea {
+  &:focus,
+  &:focus-within {
+    --input-color: var(--color-primary);
+    border-color: var(--color-primary);
+    outline: 2px solid transparent;
+    outline-offset: 2px;
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-primary) 20%, transparent);
+  }
+}
+
+/* ============ 节日祝福横幅的滚动（喇叭通知） ============
+ * 一组祝福语首尾相接地滚过去，滚完一组立刻接上下一组，所以轨道里要放两份以上完全相同的
+ * 内容，位移量正好等于「一组的宽度」，接缝处才看不出断点。
+ * 有两个变量由横幅的内联脚本按实测宽度写入：
+ *   --bz-shift  位移量（一组文案的宽度）
+ *   --bz-dur    滚动时长（按 60px/秒 折算，保证每条都来得及看完）
+ * 这里给默认值，保证脚本没跑起来时也能正常滚动（按两组各占一半算）。 */
+.bz-marquee {
+  overflow: hidden;
+}
+
+.bz-marquee-track {
+  display: flex;
+  width: max-content;
+  animation: bz-marquee var(--bz-dur, 30s) linear infinite;
+}
+
+.bz-marquee-group {
+  display: flex;
+}
+
+/* 每条右侧留出间隔，免得上一条的字紧贴下一条 */
+.bz-marquee-item {
+  padding-right: 4rem;
+  white-space: nowrap;
+}
+
+@keyframes bz-marquee {
+  from { transform: translateX(0); }
+  to   { transform: translateX(var(--bz-shift, -50%)); }
+}
+
+/* 无限横向位移对前庭敏感人群不友好；系统开启「减少动态效果」时停住，
+   文案仍完整可见（静止展示），不影响功能。 */
+@media (prefers-reduced-motion: reduce) {
+  .bz-marquee-track { animation: none; }
+}
+
+/* 需要自定义主题时取消注释（daisyui-theme.mjs 为此保留）：
+ * @plugin "./daisyui-theme.mjs" {
+ *   name: "mytheme";
+ *   default: true;
+ *   --color-primary: oklch(55% 0.3 240);
+ *   ...（其余变量见 https://daisyui.com/docs/themes/#how-to-add-a-new-custom-theme）
+ * }
+ */

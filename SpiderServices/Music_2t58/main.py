@@ -2,6 +2,7 @@ import os
 import re
 import time
 import hashlib
+import threading
 import urllib.parse
 
 import requests
@@ -10,7 +11,7 @@ from dotenv import load_dotenv
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 
-load_dotenv()
+load_dotenv(override=True)   # 以 .env 为准，避免已存在的环境变量（旧快照）覆盖项目配置
 
 # ============ 缓存配置 ============
 # 全局默认缓存时长(小时):由 .env 的 CACHE_TTL_HOURS 控制,默认 2 小时(1-3 小时均可)。
@@ -78,6 +79,10 @@ class Music2t58Spider:
         'Referer': 'https://www.2t58.com/',
     }
 
+    # 搜索被屏蔽时的特征文字：源站对这类词不返回结果页，只回一个约 1KB 的提示页。
+    # 见过的原文：「信息提示:没有找到该关键词的相关歌曲。正在返回首页!」
+    BLOCKED_MARKERS = ('信息提示', '正在返回首页')
+
     # 歌曲详情页相关配置
     # 播放链接/歌词接口
     PLAY_API = 'https://www.2t58.com/js/play.php'
@@ -85,26 +90,41 @@ class Music2t58Spider:
     # AES 解密密钥（提取自 playen.js，经 SHA256 后用于 AES-ECB 解密播放链接）
     DECRYPT_KEY = 'SklaBTy1aTSEEtMjAyNg'
 
+    # 全进程共用的 requests.Session（见 _shared_session）
+    _SHARED_SESSION = None
+    _SESSION_LOCK = threading.Lock()
+
+    @classmethod
+    def _shared_session(cls):
+        """取全进程共用的 Session，首次调用时创建
+
+        为什么共用：Session 的价值就是连接复用与 Cookie 保持。所有视图都是
+        `Music2t58Spider().fetch_xxx()` 这样每次新建实例，如果 Session 也跟着新建，
+        那每个请求都要重做一遍 TCP+TLS 握手、连接池形同虚设，人机验证状态也保不住。
+        """
+        with cls._SESSION_LOCK:
+            if cls._SHARED_SESSION is None:
+                session = requests.Session()
+                session.headers.update(cls.HEADERS)
+                # 注入人机验证通过后的 PHPSESSID
+                phpsessid = os.getenv('MUSIC_2T58_PHPSESSID', '')
+                if phpsessid:
+                    session.cookies.set('PHPSESSID', phpsessid)
+                cls._SHARED_SESSION = session
+            return cls._SHARED_SESSION
+
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update(self.HEADERS)
-        # 注入人机验证通过后的 PHPSESSID
-        phpsessid = os.getenv('MUSIC_2T58_PHPSESSID', '')
-        if phpsessid:
-            self.session.cookies.set('PHPSESSID', phpsessid)
+        self.session = self._shared_session()
 
     # ============ 缓存辅助方法 ============
     # 每个页面类型对应一个 .env 覆盖项,不配置时用全局 CACHE_TTL_HOURS
+    # 不含 search：搜索结果不走页面缓存,由本地曲库统一缓存(见 _do_fetch_search 说明)
+    # 不含 singer_list：歌手列表不再有带缓存的抓取,由 sync_singers 直连 _do_fetch_singer_list
     CACHE_TYPE_TTL_ENV = {
         'home': 'CACHE_TTL_HOURS_HOME',
         'singer': 'CACHE_TTL_HOURS_SINGER',
         'song': 'CACHE_TTL_HOURS_SONG',
-        'search': 'CACHE_TTL_HOURS_SEARCH',
         'chart': 'CACHE_TTL_HOURS_CHART',
-        'singer_list': 'CACHE_TTL_HOURS_SINGER_LIST',
-        'playtype': 'CACHE_TTL_HOURS_PLAYTYPE',
-        'playlist': 'CACHE_TTL_HOURS_PLAYLIST',
-        'mvlist': 'CACHE_TTL_HOURS_MVLIST',
     }
 
     def _ttl_for(self, cache_type):
@@ -125,13 +145,42 @@ class Music2t58Spider:
         return f'2t58_{joined}'
 
     def _cached(self, key, fetch_func, timeout):
-        """带缓存的抓取:命中缓存直接返回,未命中执行抓取后写入缓存"""
+        """带缓存的抓取:命中缓存直接返回,未命中执行抓取后写入缓存
+
+        空结果(验证未通过/解析不到内容)不写缓存,避免失败结果被缓存住,
+        导致源站恢复后页面仍长时间无数据。
+        """
         data = cache.get(key)
         if data is not None:
             return data
         data = fetch_func()
-        cache.set(key, data, timeout)
+        if not self._is_empty(data):
+            cache.set(key, data, timeout)
         return data
+
+    # 判断"是否有内容"时忽略的回显参数(直接来自 URL 参数,不是抓取到的内容)
+    CACHE_IGNORE_KEYS = {'sid'}
+
+    def _has_content(self, data):
+        """递归判断抓取结果是否含有效内容
+
+        规则:字典看值(跳过回显参数)、列表看长度、字符串需非空白;
+        数字/布尔等标量不视为内容,避免把空壳结构误判为有数据。
+        """
+        if isinstance(data, dict):
+            return any(
+                self._has_content(v) for k, v in data.items()
+                if k not in self.CACHE_IGNORE_KEYS
+            )
+        if isinstance(data, list):
+            return len(data) > 0
+        if isinstance(data, str):
+            return bool(data.strip())
+        return False
+
+    def _is_empty(self, data):
+        """抓取结果为空(验证未通过/解析不到内容)时返回 True"""
+        return not self._has_content(data)
 
     def _get_html(self, url):
         """获取页面 HTML，自动处理人机验证
@@ -143,12 +192,16 @@ class Music2t58Spider:
         resp = self.session.get(url, timeout=10)
         resp.raise_for_status()
         # 优先用 Content-Type 声明的编码；无声明（requests 默认 ISO-8859-1）时回退到 chardet 检测
-        if not resp.encoding or resp.encoding.lower() == 'iso-8859-1':
-            resp.encoding = resp.apparent_encoding
-        html = resp.text
+        html = self._fix_encoding(resp).text
         # 命中人机验证页时，提交表单通过验证后重新请求原页面
         if 'csrf_token' in html and '安全人机验证' in html:
             html = self._pass_verification(url, html)
+        # 过完验证仍是验证页 → PHPSESSID 失效或源站改了验证流程，这次抓取是失败的。
+        # 必须报错，不能把验证页当正常页面返回：验证页里没有结果列表，曲库会把
+        # 「空结果」当成「这个关键词查不到」打上负缓存（默认 12 小时内不再回源），
+        # 于是一次验证失效就变成"所有搜索都搜不到"。
+        if '安全人机验证' in html:
+            raise RuntimeError(f'人机验证未通过（PHPSESSID 可能已过期）：{url}')
         return html
 
     def _pass_verification(self, url, html):
@@ -166,12 +219,23 @@ class Music2t58Spider:
         # 勾选"我不是人机"并提交，session 自动保存验证状态
         resp = self.session.post(url, data={'csrf_token': csrf_token, 'human_check': 'on'},
                                  headers={'Referer': url, 'Origin': origin}, timeout=10)
+        # 先修编码再判断中文标记：POST 回来的验证页一般是 GBK，requests 默认按
+        # ISO-8859-1 解码时「安全人机验证」肯定匹配不上，就会漏掉下面的兜底 GET。
+        resp = self._fix_encoding(resp)
         # 若 POST 跟随后仍是验证页，再 GET 一次兜底
         if '安全人机验证' in resp.text:
-            resp = self.session.get(url, timeout=10)
+            resp = self._fix_encoding(self.session.get(url, timeout=10))
+        return resp.text
+
+    @staticmethod
+    def _fix_encoding(resp):
+        """编码兜底：Content-Type 没声明编码时（requests 默认 ISO-8859-1）用探测结果覆盖
+
+        不修的话中文全是乱码，所有中文文案标记（如「安全人机验证」「信息提示」）都匹配不上。
+        """
         if not resp.encoding or resp.encoding.lower() == 'iso-8859-1':
             resp.encoding = resp.apparent_encoding
-        return resp.text
+        return resp
 
     def fetch_home(self):
         """抓取首页三大板块：热门歌手 / 歌曲飙升榜 / 流行趋势榜（带缓存）
@@ -308,6 +372,22 @@ class Music2t58Spider:
             })
         return {'links': links}
 
+    @staticmethod
+    def last_page_number(data):
+        """从分页区「尾页」链接的 href 里读真实末页页码，读不到返回 0（未知）
+
+        不能取可见页码文字的最大值 —— 那只是分页窗口。实测歌手列表第 1 页只显示
+        「1 2 下一页 尾页」，取最大值会得到 2，而真实末页是 247（共 23631 位歌手）。
+        曲库判断"这个关键词还能不能再翻"用的是同一套判断，所以放在这里共用。
+        """
+        for link in (data.get('pagination') or {}).get('links') or []:
+            if (link.get('text') or '').strip() != '尾页':
+                continue
+            match = re.search(r'/(\d+)\.html', link.get('href') or '')
+            if match:
+                return int(match.group(1))
+        return 0
+
     def fetch_song(self, sid):
         """抓取歌曲详情页：歌曲信息 / 播放链接 / 歌词 / 每日推荐（带缓存）
 
@@ -316,12 +396,26 @@ class Music2t58Spider:
         避免 CDN 直链过期导致播放失败。
         """
         # 长缓存：歌曲信息 / 歌词 / 每日推荐
+        # refetched 用来区分"这次真的回源了"还是"命中了长缓存"：
+        # 回源时 _do_fetch_song 已经为歌词/封面请求过 play.php，直链也在它的返回值里，
+        # 不必再走下面那次短缓存 —— 否则直链抓不到时（_cached 不缓存空值）
+        # 同一个请求里会把 play.php 请求两遍，等于对源站的打扰翻倍。
+        state = {'refetched': False}
+
+        def _load():
+            state['refetched'] = True
+            return self._do_fetch_song(sid)
+
         data = self._cached(
             self._cache_key('song', sid),
-            lambda: self._do_fetch_song(sid),
+            _load,
             self._ttl_for('song'),
         )
-        # 短缓存：播放直链（长缓存未命中时 _do_fetch_song 已顺手写入）
+        if state['refetched']:
+            return data
+
+        # 命中长缓存：直链按它自己的短 TTL（CACHE_TTL_PLAY_MINUTES）单独刷新，
+        # 因为 CDN 直链的时效比歌曲信息短得多。
         data['play_url'] = self._cached(
             self._cache_key('song_play', sid),
             lambda: self._fetch_play_info(sid, f'{self.HOME_URL}song/{sid}.html')['play_url'],
@@ -343,12 +437,16 @@ class Music2t58Spider:
             song_info['cover'] = play_info['cover']
 
         # 顺手把本次抓取的播放直链写入短缓存，避免被 fetch_song 重复请求 play.php
-        cache.set(self._cache_key('song_play', sid), play_info['play_url'], self._play_ttl())
+        if play_info['play_url']:
+            cache.set(self._cache_key('song_play', sid), play_info['play_url'], self._play_ttl())
 
         return {
             'song': song_info,
             'lyrics': lyrics,
             'daily_recommend': daily,
+            # 顺带把本次取到的直链带回给 fetch_song：它已经为歌词/封面请求过 play.php，
+            # 直接复用即可，不要让调用方再走一次短缓存（否则直链为空时会重复请求源站）。
+            'play_url': play_info['play_url'],
         }
 
     def fetch_download(self, sid):
@@ -369,31 +467,57 @@ class Music2t58Spider:
             'lyrics': lyrics,
         }
 
-    def fetch_search(self, keyword, page=1):
-        """抓取搜索结果页：结果列表 / 分页（带缓存）
+    def _do_fetch_search(self, keyword, page):
+        """抓取搜索结果页：结果列表 / 分页 / 是否被屏蔽（不带缓存）
 
         keyword 为搜索关键词，page 为页码。
         URL 规则：第1页 /so/{kw}.html，第N页 /so/{kw}/{N}.html
-        """
-        return self._cached(
-            self._cache_key('search', keyword, page),
-            lambda: self._do_fetch_search(keyword, page),
-            self._ttl_for('search'),
-        )
 
-    def _do_fetch_search(self, keyword, page):
+        刻意不提供带缓存的 fetch_search 版本：搜索结果统一由本地曲库
+        （Web/services/music_library.py）负责缓存，再叠一层页面文件缓存只会
+        让数据比预期更旧，还多一层要推理的东西。
+        """
         encoded = urllib.parse.quote(keyword)
         if page > 1:
             url = f'{self.HOME_URL}so/{encoded}/{page}.html'
         else:
             url = f'{self.HOME_URL}so/{encoded}.html'
-        tree = etree.HTML(self._get_html(url))
+        html = self._get_html(url)
+        tree = etree.HTML(html)
+        results = self._parse_search_results(tree)
 
         return {
             'keyword': keyword,
-            'results': self._parse_search_results(tree),
+            'results': results,
+            'total_results': self._parse_total_results(tree),
             'pagination': self._parse_pagination(tree),
+            'blocked': self._is_blocked(html, results),
         }
+
+    @staticmethod
+    def _parse_total_results(tree):
+        """源站自己报的结果总数（div.pagedata 里的数字），读不到返回 0
+
+        页面结构：<div class="pagedata">共有<span>3600</span>首搜索结果</div>
+
+        有这个数字就不用拿"页数 × 每页条数"去估：实测末页通常不满，估算会偏大
+        （陈奕迅 53 页，估算 3604，源站实际写的是 3600）。
+        """
+        for text in tree.xpath('//div[@class="pagedata"]/span/text()'):
+            text = text.strip()
+            if text.isdigit():
+                return int(text)
+        return 0
+
+    def _is_blocked(self, html, results):
+        """判断这一页是不是"关键词被屏蔽"的提示页
+
+        和"这个词真的没有结果"要区分开：真没结果时源站仍会返回完整的结果页骨架
+        （有 play_list 容器，写着"共有 0 首搜索结果"），而被屏蔽只回一句提示。
+        """
+        if results:
+            return False
+        return any(marker in html for marker in self.BLOCKED_MARKERS)
 
     def fetch_chart(self, chart, page=1):
         """抓取榜单页：热门榜单 / 结果列表 / 分页（带缓存）
@@ -450,19 +574,16 @@ class Music2t58Spider:
             })
         return result
 
-    def fetch_singer_list(self, area='index', gender='index', style='index', letter='index', page=1):
-        """抓取歌手列表页：分类筛选 / 歌手列表 / 分页（带缓存）
+    def _do_fetch_singer_list(self, area, gender, style, letter, page):
+        """抓取歌手列表页并解析（不带缓存）
 
         URL 规则：/singerlist/{area}/{gender}/{style}/{letter}/{page}.html
         area/gender/style/letter 为分类标识，index 表示全部。
-        """
-        return self._cached(
-            self._cache_key('singer_list', area, gender, style, letter, page),
-            lambda: self._do_fetch_singer_list(area, gender, style, letter, page),
-            self._ttl_for('singer_list'),
-        )
 
-    def _do_fetch_singer_list(self, area, gender, style, letter, page):
+        只给 manage.py sync_singers 全量爬名册用（一次爬 247 页，逐页读一遍就走，
+        没有"下次再读同一页"的场景），所以刻意不经过页面缓存。
+        歌手大全页面本身也不再走这里 —— 它读本地歌手库，见 Web/services/singer_library.py。
+        """
         base = f'{self.HOME_URL}singerlist/{area}/{gender}/{style}/{letter}'
         url = f'{base}/{page}.html' if page > 1 else f'{base}.html'
         tree = etree.HTML(self._get_html(url))
@@ -522,339 +643,13 @@ class Music2t58Spider:
             result.append({'label': label, 'options': options})
         return result
 
-    def fetch_playtype_list(self, playtype='index', page=1):
-        """抓取歌单列表页：分类筛选 / 歌单列表 / 分页（带缓存）
-
-        URL 规则：/playtype/{playtype}/{page}.html，playtype 为分类标识，index 表示全部。
-        """
-        return self._cached(
-            self._cache_key('playtype', playtype, page),
-            lambda: self._do_fetch_playtype_list(playtype, page),
-            self._ttl_for('playtype'),
-        )
-
-    def _do_fetch_playtype_list(self, playtype, page):
-        if page > 1:
-            url = f'{self.HOME_URL}playtype/{playtype}/{page}.html'
-        else:
-            url = f'{self.HOME_URL}playtype/{playtype}.html'
-        tree = etree.HTML(self._get_html(url))
-
-        # 解析页面标题（.video_list .title h1）和歌单总数（.pagedata span）
-        title_nodes = tree.xpath('//div[@class="video_list"]//div[@class="title"]//h1//text()')
-        title = ''.join(title_nodes).strip()
-        total_nodes = tree.xpath('//div[@class="pagedata"]//span//text()')
-        total = total_nodes[0].strip() if total_nodes else ''
-
-        return {
-            'title': title,
-            'total': total,
-            'playlists': self._parse_playlist_list(tree),
-            'filters': self._parse_playtype_filters(tree, playtype),
-            'pagination': self._parse_pagination(tree),
-        }
-
-    def _parse_playlist_list(self, tree):
-        """解析歌单列表：title / link / pic（div.video_list ul.play li）"""
-        result = []
-        for li in tree.xpath('//div[@class="video_list"]//ul[contains(@class,"play")]/li'):
-            name_a = li.xpath('.//div[@class="name"]/a')
-            if not name_a:
-                continue
-            img = li.xpath('.//div[@class="pic"]//img/@src')
-            result.append({
-                'title': name_a[0].get('title', '') or (name_a[0].text or '').strip(),
-                'link': name_a[0].get('href', ''),
-                'pic': img[0] if img else '',
-            })
-        return result
-
-    def _parse_playtype_filters(self, tree, playtype='index'):
-        """解析歌单列表页6个分类筛选区域（div.ilingku_fl）
-
-        源站不标记 current，传入 playtype 时按 link 末段标识自动匹配当前分类。
-        playtype=index（全部）时无任何选项高亮，与源站一致。
-        返回 [{label, options: [{title, link, current}]}]
-        """
-        result = []
-        for fl in tree.xpath('//div[@class="ilingku_fl"]'):
-            lis = fl.xpath('./li')
-            if not lis:
-                continue
-            # 第一个 li 是标题文字（如"主题:"）
-            label = ''.join(lis[0].itertext()).strip()
-            options = []
-            for li in lis[1:]:
-                a = li.xpath('./a')
-                if not a:
-                    continue
-                title = (a[0].text or '').strip()
-                if not title:
-                    continue
-                link = a[0].get('href', '')
-                # 源站不标记 current，按 link 末段标识匹配当前 playtype
-                link_type = link.replace('.html', '').rstrip('/').split('/')[-1]
-                is_current = bool(playtype) and playtype != 'index' and link_type == playtype
-                options.append({
-                    'title': title,
-                    'link': link,
-                    'current': is_current,
-                })
-            result.append({'label': label, 'options': options})
-        return result
-
-    def fetch_playlist(self, sid, page=1):
-        """抓取歌单详情页：歌单信息 / 歌曲列表 / 分页（带缓存）
-
-        URL 规则：/playlist/{sid}/{page}.html，第1页 /playlist/{sid}.html。
-        歌曲列表结构与搜索结果一致，复用 _parse_search_results。
-        """
-        return self._cached(
-            self._cache_key('playlist', sid, page),
-            lambda: self._do_fetch_playlist(sid, page),
-            self._ttl_for('playlist'),
-        )
-
-    def _do_fetch_playlist(self, sid, page):
-        if page > 1:
-            url = f'{self.HOME_URL}playlist/{sid}/{page}.html'
-        else:
-            url = f'{self.HOME_URL}playlist/{sid}.html'
-        tree = etree.HTML(self._get_html(url))
-
-        # 歌曲总数（.pagedata span）
-        total_nodes = tree.xpath('//div[@class="pagedata"]//span//text()')
-        total = total_nodes[0].strip() if total_nodes else ''
-
-        return {
-            'sid': sid,
-            'playlist': self._parse_playlist_info(tree),
-            'total': total,
-            'songs': self._parse_search_results(tree),
-            'pagination': self._parse_pagination(tree),
-        }
-
-    def _parse_playlist_info(self, tree):
-        """解析歌单信息：title / pic / info（div.singer_info，与歌手详情页同结构）"""
-        box = tree.xpath('//div[@class="singer_info"]')
-        if not box:
-            return {}
-        box = box[0]
-        title = box.xpath('.//h1/text()')
-        pic = box.xpath('.//div[@class="pic"]//img/@src')
-        info = box.xpath('.//div[@class="info"]//text()')
-        return {
-            'title': title[0].strip() if title else '',
-            'pic': pic[0] if pic else '',
-            'info': ''.join(info).strip(),
-        }
-
-    def fetch_mvlist(self, mvtype='index', page=1):
-        """抓取MV列表页：分类筛选 / MV列表 / 分页（带缓存）
-
-        URL 规则：/mvlist/{mvtype}/{page}.html，mvtype 为分类标识，index 表示全部。
-        """
-        return self._cached(
-            self._cache_key('mvlist', mvtype, page),
-            lambda: self._do_fetch_mvlist(mvtype, page),
-            self._ttl_for('mvlist'),
-        )
-
-    def _do_fetch_mvlist(self, mvtype, page):
-        if page > 1:
-            url = f'{self.HOME_URL}mvlist/{mvtype}/{page}.html'
-        else:
-            url = f'{self.HOME_URL}mvlist/{mvtype}.html'
-        tree = etree.HTML(self._get_html(url))
-
-        # 解析页面标题（.video_list .title h1）和视频总数（.pagedata span）
-        title_nodes = tree.xpath('//div[@class="video_list"]//div[@class="title"]//h1//text()')
-        title = ''.join(title_nodes).strip()
-        total_nodes = tree.xpath('//div[@class="pagedata"]//span//text()')
-        total = total_nodes[0].strip() if total_nodes else ''
-
-        return {
-            'title': title,
-            'total': total,
-            'videos': self._parse_video_list(tree),
-            'filters': self._parse_mvlist_filters(tree),
-            'pagination': self._parse_pagination(tree),
-        }
-
-    def _parse_video_list(self, tree):
-        """解析MV列表：title / link / pic（div.video_list ul li）"""
-        result = []
-        for li in tree.xpath('//div[@class="video_list"]//ul/li'):
-            name_a = li.xpath('.//div[@class="name"]/a')
-            if not name_a:
-                continue
-            img = li.xpath('.//div[@class="pic"]//img/@src')
-            result.append({
-                'title': name_a[0].get('title', '') or (name_a[0].text or '').strip(),
-                'link': name_a[0].get('href', ''),
-                'pic': img[0] if img else '',
-            })
-        return result
-
-    def _parse_mvlist_filters(self, tree):
-        """解析MV列表页分类筛选区域（div.ilingku_fl）
-
-        源站标记 current（与歌手列表一致），直接读取 class。
-        返回 [{label, options: [{title, link, current}]}]
-        """
-        result = []
-        for fl in tree.xpath('//div[@class="ilingku_fl"]'):
-            lis = fl.xpath('./li')
-            if not lis:
-                continue
-            label = ''.join(lis[0].itertext()).strip()
-            options = []
-            for li in lis[1:]:
-                a = li.xpath('./a')
-                if not a:
-                    continue
-                title = (a[0].text or '').strip()
-                if not title:
-                    continue
-                options.append({
-                    'title': title,
-                    'link': a[0].get('href', ''),
-                    'current': 'current' in (a[0].get('class') or ''),
-                })
-            result.append({'label': label, 'options': options})
-        return result
-
-    def _resolve_vplay_url(self, sid, q):
-        """请求 vplay 接口获取 302 重定向的 CDN mp4 直链
-
-        浏览器无源站 PHPSESSID，直访 vplay 会被重定向到首页导致视频加载失败，
-        故由后端预解析真实 CDN 直链供前端 DPlayer 直接播放。
-        """
-        url = f'{self.HOME_URL}plug/down.php?ac=vplay&id={sid}&q={q}'
-        try:
-            r = self.session.get(url, allow_redirects=False, timeout=10)
-            if r.status_code == 302:
-                return r.headers.get('Location', '')
-        except Exception:
-            pass
-        return ''
-
-    def fetch_video(self, sid):
-        """抓取MV详情页：MV标题 / 歌手信息 / 专辑 / 下载 / 每日推荐 / DPlayer配置（带缓存）
-
-        sid 为MVid（如 d3Ntd2tkY3Nz）。
-        详情内含 CDN mp4 直链（qualities），直链有时效，故整体按播放直链
-        短缓存时长缓存（默认 30 分钟），防止视频链接过期播放失败。
-        """
-        return self._cached(
-            self._cache_key('video', sid),
-            lambda: self._do_fetch_video(sid),
-            self._play_ttl(),
-        )
-
-    def _do_fetch_video(self, sid):
-        url = f'{self.HOME_URL}video/{sid}.html'
-        html = self._get_html(url)
-        tree = etree.HTML(html)
-
-        # DPlayer 封面图（从初始化脚本 pic 字段正则提取）
-        cover_m = re.search(r'pic:\s*"([^"]+)"', html)
-        cover = cover_m.group(1) if cover_m else ''
-
-        detail = self._parse_video_detail(tree, sid)
-        detail['cover'] = cover
-        return detail
-
-    def _parse_video_detail(self, tree, sid):
-        """解析MV详情页各模块：标题 / 歌手 / 专辑 / 下载 / 清晰度 / 每日推荐"""
-        # MV 标题（.play_left .title h1）
-        title_nodes = tree.xpath('//div[@class="play_left"]//div[@class="title"]//h1//text()')
-        title = ''.join(title_nodes).strip()
-
-        # 歌手信息（.play_singer）
-        singer = {}
-        singer_box = tree.xpath('//div[@class="play_singer"]')
-        if singer_box:
-            box = singer_box[0]
-            name_a = box.xpath('.//div[@class="name"]/a')
-            pic_img = box.xpath('.//div[@class="pic"]//img/@src')
-            info_text = box.xpath('.//div[@class="info"]//text()')
-            singer = {
-                'name': (name_a[0].text or '').strip() if name_a else '',
-                'link': name_a[0].get('href', '') if name_a else '',
-                'pic': pic_img[0] if pic_img else '',
-                'video_count': ''.join(info_text).strip(),
-            }
-
-        # 专辑 / 语言时间（.play_right .sm 按内容区分）
-        album = {}
-        language_time = ''
-        for sm in tree.xpath('//div[@class="play_right"]//div[@class="sm"]'):
-            text = ''.join(sm.itertext()).strip()
-            if '所属专辑' in text:
-                a = sm.xpath('.//a')
-                album = {
-                    'name': (a[0].text or '').strip() if a else '',
-                    'link': a[0].get('href', '') if a else '',
-                }
-            elif '所属语言' in text:
-                language_time = text
-
-        # 下载清晰度（.download li，onclick lkdown('sid','q','ilingku')）
-        downloads = []
-        for li in tree.xpath('//div[@class="download"]//li'):
-            text = ''.join(li.itertext()).strip()
-            label = text.split('：')[0] if '：' in text else ''
-            lines = []
-            for a in li.xpath('.//a'):
-                m = re.search(r"lkdown\('([^']+)','([^']+)','([^']+)'\)", a.get('onclick', ''))
-                if m:
-                    lkid, q, ilingku = m.groups()
-                    line_name = ''.join(a.itertext()).strip()
-                    lines.append({
-                        'name': line_name,
-                        'q': q,
-                        'url': f'{self.HOME_URL}down.php?ac=video&id={lkid}&q={q}&ilingku={ilingku}',
-                    })
-            if label and lines:
-                downloads.append({'label': label, 'lines': lines})
-
-        # DPlayer 清晰度：预解析 vplay 接口 302 的 CDN mp4 直链
-        # 浏览器无源站 PHPSESSID，直访 vplay 会被重定向到首页导致视频加载失败
-        qualities = sorted([
-            {'name': d['label'], 'q': d['lines'][0]['q'],
-             'url': self._resolve_vplay_url(sid, d['lines'][0]['q'])}
-            for d in downloads if d['lines']
-        ], key=lambda x: int(x['q']), reverse=True)
-
-        # 每日推荐（.play_list ul li，部分含 mv 链接）
-        daily = []
-        for li in tree.xpath('//div[@class="play_list"]//ul/li'):
-            name_a = li.xpath('.//div[@class="name"]/a')
-            if not name_a:
-                continue
-            title_text = (name_a[0].text or '').strip()
-            if not title_text:
-                continue
-            mv_a = li.xpath('.//div[@class="mv"]/a')
-            daily.append({
-                'title': title_text,
-                'link': name_a[0].get('href', ''),
-                'mv_link': mv_a[0].get('href', '') if mv_a else '',
-            })
-
-        return {
-            'sid': sid,
-            'title': title,
-            'singer': singer,
-            'album': album,
-            'language_time': language_time,
-            'qualities': qualities,
-            'daily_recommend': daily,
-        }
-
     def _parse_search_results(self, tree):
-        """解析搜索结果列表：title / link（结构与每日推荐一致，div.play_list ul li）"""
+        """解析搜索结果列表：title / link / sid / name / singers
+
+        结构与每日推荐一致（div.play_list ul li）。
+        title 保留源站原文（格式「歌手 - 歌名」）供列表直接渲染；
+        另外拆出 sid / name / singers，让曲库入库时不必再解析一遍标题。
+        """
         result = []
         for li in tree.xpath('//div[@class="play_list"]//ul/li'):
             a = li.xpath('.//div[@class="name"]/a')
@@ -863,11 +658,23 @@ class Music2t58Spider:
             title = (a[0].text or '').strip()
             if not title:
                 continue
+            link = a[0].get('href', '')
+            artists, song_name = self._parse_song_title(title)
             result.append({
                 'title': title,
-                'link': a[0].get('href', ''),
+                'link': link,
+                'sid': self._sid_from_link(link),
+                'name': song_name,
+                # 歌手用 & 连接，与源站标题里的写法保持一致，便于原样还原出 title
+                'singers': '&'.join(artists),
             })
         return result
+
+    @staticmethod
+    def _sid_from_link(link):
+        """从结果链接末段取 2t58 歌曲 id：/song/d3dkc2t3.html → d3dkc2t3"""
+        tail = link.rsplit('/', 1)[-1]
+        return tail[:-5] if tail.endswith('.html') else ''
 
     @staticmethod
     def _parse_song_title(title):
@@ -884,13 +691,12 @@ class Music2t58Spider:
         return artists, song_name
 
     def _parse_song_info(self, tree):
-        """解析歌曲基本信息：name / artists / cover / singer_url / pack_url
+        """解析歌曲基本信息：name / artists / cover / singer_url
 
         结构:
             - 歌名: div.djname > h1 文本，格式 "歌手 - 歌名"
             - 封面图: div.play_singer > div.pic > img @src
             - 歌手: div.play_singer > div.center > div.name > a @title / @href
-            - 打包下载: div.play_singer > div.center > div.info > a @href（外部网盘搜索）
         """
         h1_texts = tree.xpath('//div[@class="djname"]/h1/text()')
         title = ''.join(h1_texts).strip()
@@ -909,15 +715,8 @@ class Music2t58Spider:
             if not artists and singer_name:
                 artists = [singer_name]
 
-        # 打包下载链接: 源站 a#sdown 的 href 由 JS 动态设置（wuqupan 搜索歌手名），
-        # 静态 HTML 中为空，按相同规则构造
-        pack_url = (
-            f'http://www.wuqupan.com/share/search?key={urllib.parse.quote(singer_name)}'
-            if singer_name else ''
-        )
-
         return {'name': song_name, 'artists': artists, 'cover': cover,
-                'singer_url': singer_url, 'pack_url': pack_url}
+                'singer_url': singer_url}
 
     def _parse_daily_recommend(self, tree):
         """解析"每日推荐"歌曲列表：title / link"""
@@ -963,7 +762,7 @@ class Music2t58Spider:
         }
 
     def _fetch_lyrics(self, cid):
-        """请求 lrc.php 获取 LRC 格式歌词文本（带时间标签，供前端 $.lrc 同步滚动）"""
+        """请求 lrc.php 获取 LRC 格式歌词文本（带时间标签，供前端 window.BZLrc 同步滚动）"""
         if not cid:
             return ''
         try:

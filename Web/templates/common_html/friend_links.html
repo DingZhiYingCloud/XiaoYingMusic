@@ -1,14 +1,12 @@
-<!-- 友情连接（全站公共组件：由 common_html/footer.html 顶部引入，所有页面自动展示） -->
+<!-- 友情连接（全站公共组件：由 common_html/footer.html 引入到页脚栅格中，所有页面自动展示） -->
 <!-- 链接由后端统一请求小影 API 获取（Web/services/friend_links.py，缓存1小时），渲染进 HTML 供搜索引擎直接可见 -->
-<div class="layui-container">
-    <div class="layui-row">
-        <div class="link">
-            <h2>友情连接</h2>
-            <div>
-                {% for link in friend_links %}
-                <a href="{{ link.url }}" target="_blank" rel="noopener">{{ link.name }}</a>
-                {% endfor %}
-            </div>
-        </div>
-    </div>
-</div>
+{% if friend_links %}
+<nav>
+    <h2 class="footer-title mb-3 font-semibold opacity-60">友情连接</h2>
+    <ul class="space-y-2 text-sm">
+        {% for link in friend_links %}
+        <li><a class="link link-hover" href="{{ link.url }}" target="_blank" rel="noopener">{{ link.name }}</a></li>
+        {% endfor %}
+    </ul>
+</nav>
+{% endif %}

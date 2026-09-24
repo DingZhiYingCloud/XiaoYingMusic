@@ -1,0 +1,29 @@
+{# 移动端侧边抽屉：与顶部导航同源，窄屏下展示更完整的栏目 #}
+<div class="drawer-side z-50">
+    <label for="bz-drawer" class="drawer-overlay" aria-label="关闭菜单"></label>
+
+    <aside class="flex min-h-full w-72 flex-col bg-base-200">
+        <div class="flex items-center gap-3 border-b border-base-300 p-4">
+            {% include 'common_html/logo_mark.html' with cls="h-10 w-10 shrink-0" %}
+            <div class="min-w-0">
+                <div class="truncate font-bold">{{ SITE_NAME }}</div>
+                <div class="truncate text-xs opacity-60">{{ SITE_NAME_ALT }}</div>
+            </div>
+            <span class="badge badge-primary badge-sm ml-auto">免费</span>
+        </div>
+
+        <ul class="nav menu w-full flex-1 gap-1 p-3">
+            <li><a href="/" data-nav="/"><i class="fa fa-home w-4"></i>首页</a></li>
+            <li class="menu-title mt-2">热榜单曲</li>
+            <li><a href="/list/new.html" data-nav="/list/new.html"><i class="fa fa-bolt w-4"></i>新声速递</a></li>
+            <li><a href="/list/top.html" data-nav="/list/top.html"><i class="fa fa-fire w-4"></i>巅峰热榜</a></li>
+            <li><a href="/list/djwuqu.html" data-nav="/list/djwuqu.html"><i class="fa fa-headphones w-4"></i>律动电音集</a></li>
+            <li class="menu-title mt-2">发现音乐</li>
+            <li><a href="/singerlist/index/index/index/index.html" data-nav="/singerlist/ /singer/"><i class="fa fa-user w-4"></i>歌手大全</a></li>
+        </ul>
+
+        <div class="border-t border-base-300 p-4 text-xs leading-relaxed opacity-60">
+            免登录 · 免安装 · 打开网页即可听完整歌曲
+        </div>
+    </aside>
+</div>

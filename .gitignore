@@ -1,8 +1,5 @@
 *.egg-info
-*.idea
-*.
-
-
+.idea/
 build
 dist
 .pytest_cache
@@ -11,9 +8,10 @@ __pycache__
 .venv
 *.apk
 
-# 环境文件
+# 环境文件（.env.example 作为配置模板需要入库，故排除在忽略之外）
 .env
 .env.*
+!.env.example
 
 # 敏感文件（实际敏感的配置）
 **/env.json
@@ -22,9 +20,25 @@ __pycache__
 *.log
 logs/
 
-# 数据库文件
+# 数据库文件（运行时数据，不入库）
 *.db
 *.sqlite3
+# SQLite 开启 WAL 后运行时生成的两个伴生文件（见 settings.py 的 DATABASES）
+*.sqlite3-wal
+*.sqlite3-shm
+
+# 例外：部署用的**种子库**要入库。
+# 它是一份只读的初始数据快照（歌手名册 / 曲目 / 封面外链 / 播放榜），
+# 让 clone 下来的站开箱就有完整数据，不必先跑几小时的爬取。
+#
+# 为什么不让 db.sqlite3 本身入库：
+#   站点跑起来后，搜索、播放计数、补货都会不断改写它 —— 一旦被 git 跟踪，
+#   工作区就永远是脏的，以后每次 `git pull` 都会因为"本地改动会被覆盖"而失败，
+#   只能 `git checkout -- db.sqlite3`，等于把线上积累的数据丢掉。
+#   所以：仓库里只放只读的种子库，线上真正的 db.sqlite3 永远不进 git。
+#
+# 重新生成种子库的命令见 README「十三、宝塔 + uWSGI 部署」。
+!deploy/seed_db.sqlite3
 
 # 爬虫缓存目录（FileBasedCache 运行时生成，不入库）
 /cache/
@@ -39,10 +53,21 @@ Thumbs.db
 # 依赖文件
 node_modules/
 
+# Tailwind CSS 工具链：107MB 的 standalone 可执行文件不入库，
+# 需要重编译 output.css 时从 GitHub Releases 重新下载（命令见 input.css 顶部注释）
+Web/static-src/css/tailwindcss.exe
+
+# collectstatic 的收集目标（本项目静态文件直接从 Web/static 服务，不用 collectstatic，
+# 这个目录只在需要把静态文件集中交给 Nginx/CDN 时才会生成）
+/staticfiles/
+
 TuLianVenv/
 
 unpackage/
 
 migrations/
+# 曲库（Web/models.py）的迁移文件需要入库，否则别人 clone 后必须先 makemigrations
+# 才能 migrate；模型没变时生成的迁移是确定的，入库不会有冲突。
+!Web/migrations/
 
 Test/

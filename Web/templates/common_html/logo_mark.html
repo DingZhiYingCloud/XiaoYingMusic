@@ -1,0 +1,25 @@
+{% comment %}
+站点 logo 图形（内联 SVG，全站共用）
+
+为什么用内联 SVG 而不是 <img>：
+  站点支持 35 套主题切换，<img> 无法继承 CSS 颜色；
+  内联 SVG 可直接用主题变量填充 —— 方块取 --color-primary，
+  音符取 --color-primary-content（daisyUI 保证二者对比度），
+  因此切换任意主题时 logo 都会自动跟着变色，无需 JS。
+
+几何坐标与 media/favicon.ico、static/images/logo.png 的生成脚本完全一致（同为 64x64 视框），
+保证「页内图标」与「位图 favicon」是同一个图形。改图形需同时改 tmp_make_logo.py 与这里。
+
+用法：{% include 'common_html/logo_mark.html' with cls="h-9 w-9" %}
+{% endcomment %}
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"
+     class="{{ cls|default:'h-9 w-9' }}" aria-hidden="true" focusable="false">
+    <rect width="64" height="64" rx="17" fill="var(--color-primary)" />
+    <g fill="var(--color-primary-content)">
+        <polygon points="24.5,20 52.9,14 52.9,22.5 24.5,28.5" />
+        <rect x="24.5" y="20" width="4.4" height="25.5" rx="1" />
+        <rect x="48.5" y="14" width="4.4" height="25.5" rx="1" />
+        <ellipse cx="19" cy="45" rx="8" ry="6.2" transform="rotate(18 19 45)" />
+        <ellipse cx="43" cy="39" rx="8" ry="6.2" transform="rotate(18 43 39)" />
+    </g>
+</svg>

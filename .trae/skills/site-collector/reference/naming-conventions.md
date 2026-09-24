@@ -28,8 +28,8 @@
 ## 功能名推导
 从目标站 URL 路径推导功能名(下划线风格):
 - 源站 `/singerlist/...` → 功能 `singer_list`
-- 源站 `/playlist/xxx.html` → 功能 `playlist`
-- 源站 `/mvlist/...` → 功能 `mvlist`
+- 源站 `/singer/xxx.html` → 功能 `singer`
+- 源站 `/list/xxx.html` → 功能 `chart`
 - 源站 `/movie/xxx.html` → 功能 `movie`
 
 ## URL 路由风格(参考现有)
@@ -37,10 +37,10 @@
 # 列表页(带分类+分页)
 path('singerlist/<area>/<gender>/<style>/<letter>/<int:page>.html', ...)
 # 列表页(单分类+分页)
-path('playtype/<playtype>/<int:page>.html', ...)
+path('list/<chart>/<int:page>.html', ...)
 # 详情页
-path('playlist/<sid>.html', ...)
-path('playlist/<sid>/<int:page>.html', ...)  # 详情页内列表分页
+path('song/<sid>.html', ...)
+path('singer/<sid>/<int:page>.html', ...)  # 详情页内列表分页
 ```
 - 路径参数用 `<sid>`(字符串)、`<int:page>`(数字)
 - 第1页与第N页可分两条路由,或在爬虫内用 `if page > 1` 拼URL

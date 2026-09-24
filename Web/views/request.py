@@ -4,18 +4,24 @@ import re
 import zipfile
 from urllib.parse import quote
 
-from django.shortcuts import render
-from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
+from django.shortcuts import redirect, render
+from django.http import HttpResponse, HttpResponseBadRequest, StreamingHttpResponse
 from django.core.cache import cache
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_POST
 
 import requests
 
 from SpiderServices.Music_2t58.main import Music2t58Spider
 
+from Web.services import music_library, play_rank, singer_library
+
 
 # ============ 榜单名称映射（原名称 → 本站文艺风新名称） ============
-# 说明：为规避与源站（2t58.com）的名称雷同，将源站榜单/列表名称统一替换为本站
+# 说明：为规避与源站（2t58.com）的名称雷同，将源站榜单名称统一替换为本站
 # 名称。右侧注释保留源站原名，方便后续开发者对照定位。
+# 注意：只服务榜单（/list/<chart>.html）。歌手大全的标题见 singer_library.ALL_TITLE，
+#       首页「今日热听榜」的名字写在 index.html 里。
 RENAME_MAP = {
     # —— 榜单页热榜合集（原：热门榜单侧栏 33 项）——
     'DJ舞曲大全': '律动电音集',
@@ -51,10 +57,6 @@ RENAME_MAP = {
     '通勤路上榜': '通勤随身榜',
     '网络红歌榜': '网络热歌榜',
     '网络最新榜': '网际新声榜',
-    # —— 列表页标题 ——
-    '全部歌手列表': '歌手大全',          # 原：全部歌手列表
-    '最新歌单歌单列表': '歌单精选',       # 原：最新歌单歌单列表
-    'MV视频列表': '映像MV大全',          # 原：MV视频列表
 }
 
 # 榜单页大标题兜底（原榜单名：new=新歌榜 / top=TOP榜单 / djwuqu=DJ舞曲大全）
@@ -66,21 +68,32 @@ CHART_ID_TITLES = {
 
 
 def rename_title(title):
-    """将源站榜单/列表名称映射为本站名称，未命中时原样返回"""
+    """将源站榜单名称映射为本站名称，未命中时原样返回"""
     return RENAME_MAP.get(title, title)
 
 
 def index(request):
-    # 调用爬虫获取首页三大板块数据；抓取失败时降级为空数据，保证页面可访问
-    try:
-        data = Music2t58Spider().fetch_home()
-    except Exception:
-        data = {'hot_singers': [], 'rising_songs': [], 'trending_songs': []}
-    return render(request, 'index.html', data)
+    # 首页三块数据全部取自本地库，一次源站都不请求（见 README 8.11）：
+    #   歌手推荐   → 本地歌手名册（Web/services/singer_library.py）
+    #   今日热听榜 → 每日播放榜（Web/services/play_rank.py）
+    #   随机点唱机 → 本地歌手曲目库随机取样（Web/services/singer_library.py）
+    # 所以这里不再调爬虫的 fetch_home()，也就没有"源站挂了首页就空"这回事。
+    return render(request, 'index.html', {
+        'hot_singers': singer_library.home_singers(),
+        'rising_songs': play_rank.today_top(),
+        'random_songs': singer_library.random_songs(),
+    })
 
 
 def singer(request, sid, page=1):
     # 歌手详情页：sid 为歌手id，page 为歌曲列表页码（路径参数）
+    # 曲目列表优先读本地库（manage.py sync_singer_songs 同步下来的 SingerSong）：
+    # 0 请求、毫秒级返回，也不再受 2 小时页面缓存到期的影响。
+    # 库里还没有这位歌手、或他要看的是第 2 页及以后（深分页未入库）时回落到爬虫，
+    # 所以未同步完也能正常访问，不会出现空白页。
+    local = singer_library.page_songs(sid, page)
+    if local is not None:
+        return render(request, 'singer.html', local)
     try:
         data = Music2t58Spider().fetch_singer(sid, page)
     except Exception:
@@ -108,39 +121,59 @@ def song(request, sid):
     return render(request, 'song.html', data)
 
 
-def api_song(request, sid):
-    """歌曲 JSON 接口：供全局底部播放条无刷新切歌（返回播放链接/封面/歌词等）
-
-    路径 /api/song/<sid>.json，浏览器端在切换待播放列表歌曲时调用。
-    歌词与播放链接由后端实时爬取，前端不参与解密逻辑。
-    """
-    try:
-        data = Music2t58Spider().fetch_song(sid)
-    except Exception:
-        data = {'song': {}, 'play_url': '', 'lyrics': ''}
-    song = data.get('song') or {}
-    return JsonResponse({
-        'sid': sid,
-        'name': song.get('name', ''),
-        'artists': song.get('artists', []),
-        'cover': song.get('cover', ''),
-        'play_url': data.get('play_url', ''),
-        'lyrics': data.get('lyrics', ''),
-        'singer_url': song.get('singer_url', ''),
-    })
-
-
 def search(request, keyword, page=1):
     # 搜索页：keyword 为搜索关键词，page 为页码（路径参数）
-    try:
-        data = Music2t58Spider().fetch_search(keyword, page)
-    except Exception:
-        data = {
-            'keyword': keyword,
-            'results': [],
-            'pagination': {'links': []},
-        }
-    return render(request, 'search.html', data)
+    # 走本地曲库（见 Web/services/music_library.py）：库里有的直接返回，没爬过的才回源站补货，
+    # 目的是把访问 2t58 的次数压到最低，避免请求过密被封 IP。
+    # 上下文结构：keyword / results / pagination / blocked（被屏蔽时模板给不同提示）。
+    # 空关键词（有人手敲 /so/%20%20.html 这类地址）直接退回首页：
+    # 留着只会渲染出一个「搜索「」」的空壳页，对用户和搜索引擎都是垃圾页。
+    if not keyword.strip():
+        return redirect('home')
+    return render(request, 'search.html',
+                  music_library.search_page(keyword, page, _client_ip(request)))
+
+
+def _client_ip(request):
+    """访客 IP：给热门榜的防刷去重用
+
+    优先取反向代理带的 X-Forwarded-For 第一跳（真实访客地址），取不到再退回直连地址。
+    """
+    forwarded = request.META.get('HTTP_X_FORWARDED_FOR', '')
+    if forwarded:
+        return forwarded.split(',')[0].strip()
+    return request.META.get('REMOTE_ADDR', '')
+
+
+# 歌曲 id 的合法形态：源站是 6~12 位 base62（如 d3dkc2t3 / ZGNua2t4dw）。
+# 播放计数接口收的是外部输入，先卡一道格式，免得有人往里塞任意字符串把表撑大。
+SID_PATTERN = re.compile(r'^[A-Za-z0-9_-]{1,32}$')
+
+
+# csrf_exempt 是**预留**的：项目当前没启用 CsrfViewMiddleware（见 README 上线清单），
+# 一旦启用，这个接口会直接 403 —— 而前端是 catch 忽略失败的，榜单会静默停掉、
+# 不报任何错，很难查。这个接口只接收 sid/歌名/歌手并做计数，没有会话语义，
+# 保持豁免即可；启用 CSRF 时不要顺手把这一行删掉。
+@csrf_exempt
+@require_POST
+def play_ended(request):
+    """整首播完回调：给这首歌的今日听完次数 +1（首页「今日热听榜」的数据源）
+
+    只有播放页在 audio 的 ended 事件里会调它，所以这个计数天然是"完整听完一遍"。
+
+    只收 sid / name / artists 三个字段。歌名和歌手后端没有（本地 Song 表只沉淀被搜到
+    的歌，播放页大多从歌手页/榜单进来），只能跟着播放页一起上来；既然是外部输入，
+    格式与长度都在这里和服务层卡住。
+
+    写库异常在 play_rank.record 里已消化（只记日志/告警），所以访客正在听的歌
+    不会因为计数失败而出错。
+    """
+    sid = (request.POST.get('sid') or '').strip()
+    if not SID_PATTERN.match(sid):
+        return HttpResponseBadRequest('sid 不合法')
+    play_rank.record(sid, request.POST.get('name', ''), request.POST.get('artists', ''),
+                     _client_ip(request))
+    return HttpResponse(status=204)
 
 
 def chart(request, chart='new', page=1):
@@ -167,83 +200,13 @@ def chart(request, chart='new', page=1):
 
 
 def singer_list(request, area='index', gender='index', style='index', letter='index', page=1):
-    # 歌手列表页：area/gender/style/letter 为分类标识，page 为页码（路径参数）
-    try:
-        data = Music2t58Spider().fetch_singer_list(area, gender, style, letter, page)
-    except Exception:
-        data = {
-            'title': '歌手大全',        # 原：全部歌手列表
-            'singers': [],
-            'filters': [],
-            'pagination': {'links': []},
-        }
-    data['title'] = rename_title(data.get('title', ''))
-    return render(request, 'singer_list.html', data)
-
-
-def playtype_list(request, playtype='index', page=1):
-    # 歌单列表页：playtype 为分类标识（如 dj、huayu），page 为页码（路径参数）
-    try:
-        data = Music2t58Spider().fetch_playtype_list(playtype, page)
-    except Exception:
-        data = {
-            'title': '歌单精选',        # 原：最新歌单歌单列表
-            'total': '',
-            'playlists': [],
-            'filters': [],
-            'pagination': {'links': []},
-        }
-    data['title'] = rename_title(data.get('title', ''))
-    return render(request, 'playtype_list.html', data)
-
-
-def mvlist(request, mvtype='index', page=1):
-    # MV列表页：mvtype 为分类标识（如 huayu、rihan），page 为页码（路径参数）
-    try:
-        data = Music2t58Spider().fetch_mvlist(mvtype, page)
-    except Exception:
-        data = {
-            'title': '映像MV大全',      # 原：MV视频列表
-            'total': '',
-            'videos': [],
-            'filters': [],
-            'pagination': {'links': []},
-        }
-    data['title'] = rename_title(data.get('title', ''))
-    return render(request, 'mvlist.html', data)
-
-
-def video(request, sid):
-    # MV详情页：sid 为MVid（路径参数）
-    try:
-        data = Music2t58Spider().fetch_video(sid)
-    except Exception:
-        data = {
-            'sid': sid,
-            'title': 'MV视频',
-            'singer': {},
-            'album': {},
-            'language_time': '',
-            'qualities': [],
-            'daily_recommend': [],
-            'cover': '',
-        }
-    return render(request, 'video.html', data)
-
-
-def playlist(request, sid, page=1):
-    """歌单详情页：sid 为歌单id，page 为歌曲列表页码（路径参数）"""
-    try:
-        data = Music2t58Spider().fetch_playlist(sid, page)
-    except Exception:
-        data = {
-            'sid': sid,
-            'playlist': {},
-            'total': '',
-            'songs': [],
-            'pagination': {'links': []},
-        }
-    return render(request, 'playlist.html', data)
+    # 歌手大全：数据来自本地歌手名册（见 Web/services/singer_library.py）。
+    # 库里没有分类数据（源站也不给结构化的地区/性别/类型），所以只做全量分页：
+    # 带分类参数的地址（搜索已收录的旧链接、外链）一律 301 收敛到全量页 ——
+    # 不收敛的话，同一个列表会在几千个不同 URL 上重复出现，搜索引擎会当成重复内容。
+    if (area, gender, style, letter) != singer_library.ALL_FILTERS:
+        return redirect(singer_library.page_url(page), permanent=True)
+    return render(request, 'singer_list.html', singer_library.page_singers(page))
 
 
 # ============ 歌曲下载（后端代理，防防盗链与链接过期） ============
@@ -262,6 +225,10 @@ _CDN_HEADERS = {
         'Chrome/131.0.0.0 Safari/537.36'
     ),
 }
+
+# 打包下载的大小上限（字节）：一首 320kbps 的歌约 10~15MB，50MB 足够宽松，
+# 只用来兜住"直链给错、指向一个巨大文件"这种异常情况。
+ZIP_MAX_BYTES = 50 * 1024 * 1024
 
 
 def _fetch_cdn_stream(play_url):
@@ -303,18 +270,31 @@ def _text_attachment(text, filename):
 
 
 def _zip_attachment(play_url, lyrics, base):
-    """MP3 + 歌词打包为 zip（标准库 zipfile，无额外依赖）"""
+    """MP3 + 歌词打包为 zip（标准库 zipfile，无额外依赖）
+
+    直链文件多大由源站决定，不由我们控制，所以按块读、超限即中止：
+    原来的写法用 resp.content 一次把整个文件读进内存，直链一旦给错
+    （指到一个大文件上），一个下载请求就能把进程内存撑爆。
+    """
     resp = _fetch_cdn_stream(play_url)
     if resp is None:
         return HttpResponse('播放链接获取失败，请稍后重试', status=502)
+    mp3 = io.BytesIO()
+    total = 0
     try:
-        mp3_data = resp.content
+        for chunk in resp.iter_content(chunk_size=64 * 1024):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > ZIP_MAX_BYTES:
+                return HttpResponse('歌曲文件过大，请改用 MP3 单独下载', status=502)
+            mp3.write(chunk)
     finally:
         resp.close()
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(f'{base}.mp3', mp3_data)
+        zf.writestr(f'{base}.mp3', mp3.getvalue())
         if lyrics:
             zf.writestr(f'{base}.lrc', lyrics)
     response = HttpResponse(buf.getvalue(), content_type='application/zip')
@@ -325,16 +305,27 @@ def _zip_attachment(play_url, lyrics, base):
 def download(request, sid, kind='mp3'):
     """歌曲下载：kind 为 mp3（仅歌曲）/ lrc（仅歌词）/ all（两个一起打包zip）
 
+    **当前暂停开放**（后续会恢复）：歌详页的下载入口已撤（见 Web/templates/song.html），
+    这里也直接 404，免得旧地址/收藏继续能下载。重新开放时删掉下面那行 return 即可 ——
+    下面的实现与 _proxy_mp3 / _text_attachment / _zip_attachment 都保持可用、未删改。
+
     后端统一经爬虫获取数据，直链经无 Referer 代理转发，
     避免直链过期或防盗链导致下载失败；文件名用歌曲名-歌手。
     """
+    # ↓↓↓ 下载功能暂停开放（后续会恢复）：删掉这一行即可重新启用 ↓↓↓
+    return HttpResponse('下载功能暂未开放', status=404)
+
     spider = Music2t58Spider()
     try:
         data = spider.fetch_download(sid)
     except Exception:
-        data = {'song': {}, 'play_url': '', 'lyrics': ''}
+        return HttpResponse('下载数据获取失败，请稍后重试', status=502)
 
     song = data.get('song') or {}
+    if not song:
+        # sid 不存在时，源站歌曲页里解析不出任何歌曲信息 —— 这是地址不对，不是服务端故障，
+        # 所以返回 404 而不是 502（502 会让搜索引擎和监控以为是我们的后端挂了）。
+        return HttpResponse('找不到这首歌', status=404)
     name = song.get('name') or f'song_{sid}'
     artists = '/'.join(song.get('artists') or []) or '未知歌手'
     # 清理文件名非法字符（Windows 不允许 \ / : * ? " < > | 和连续空格）
@@ -360,9 +351,12 @@ def error_500(request, exception=None):
 
 
 # ============ Sitemap（站点地图） ============
-# 站点内容由爬虫实时获取，因此 sitemap 分为两部分：
-#   1. 静态固定 URL：首页/榜单/列表页 + 首页推荐歌单（与 index.html 硬编码歌单保持一致，改动需同步）
-#   2. 动态 URL：调用爬虫抓取首页，提取热门歌手、榜单歌曲生成详情页链接（爬虫失败时自动降级为仅静态 URL）
+# 站点内容分三部分：
+#   1. 静态固定 URL：首页/榜单/歌单/MV 列表
+#   2. 歌手 URL：读本地歌手库（见 Web/services/singer_library.py）—— 首页那 24 位，
+#      外加歌手大全的每一个分页。两万多位歌手的入口都在这些列表页里，不必把
+#      两万多条详情页全塞进来（sitemap 会膨胀到几 MB），让爬虫顺着列表页走即可。
+#   3. 动态 URL：调用爬虫抓取首页，提取榜单歌曲生成详情页链接（爬虫失败时自动跳过）
 # 生成结果缓存 6 小时，避免每次请求 sitemap 都触发源站爬虫。
 SITEMAP_STATIC_URLS = [
     ('/', 'daily', '1.0'),
@@ -370,42 +364,36 @@ SITEMAP_STATIC_URLS = [
     ('/list/top.html', 'daily', '0.8'),
     ('/list/djwuqu.html', 'daily', '0.8'),
     ('/singerlist/index/index/index/index.html', 'daily', '0.8'),
-    ('/playtype/index.html', 'daily', '0.8'),
-    ('/mvlist/index.html', 'daily', '0.8'),
-    # 首页推荐歌单（10 个，与 Web/templates/index.html 中硬编码一致）
-    ('/playlist/ZG53dndrY2hraA.html', 'weekly', '0.6'),
-    ('/playlist/ZHZzdmR2d3ZuaA.html', 'weekly', '0.6'),
-    ('/playlist/ZGNkbW54Y3hzbQ.html', 'weekly', '0.6'),
-    ('/playlist/ZGNubm5tbnhraA.html', 'weekly', '0.6'),
-    ('/playlist/ZHZka3duZHhtaw.html', 'weekly', '0.6'),
-    ('/playlist/ZGNud3hoY3hodg.html', 'weekly', '0.6'),
-    ('/playlist/ZHZudm5jY3h4Yw.html', 'weekly', '0.6'),
-    ('/playlist/ZGNoa2todnNrcw.html', 'weekly', '0.6'),
-    ('/playlist/ZGNueHdzeG5uaw.html', 'weekly', '0.6'),
-    ('/playlist/ZHZzY254ZGtkbg.html', 'weekly', '0.6'),
 ]
 SITEMAP_CACHE_KEY = 'sitemap_urls'
 SITEMAP_CACHE_TTL = 60 * 60 * 6  # 6 小时
 
 
 def sitemap(request):
-    """sitemap.xml：静态 URL + 爬虫实时歌手/歌曲详情 URL，缓存 6 小时"""
+    """sitemap.xml：静态 URL + 本地歌手库的歌手页/歌手大全分页 + 爬虫取的歌曲详情页，缓存 6 小时"""
     urls = cache.get(SITEMAP_CACHE_KEY)
     if urls is None:
         urls = list(SITEMAP_STATIC_URLS)
         seen = {path for path, _, _ in urls}
+        # 歌手部分与首页歌手墙、歌手大全同源（本地库），别再回源站取"热门歌手"：
+        # 否则 sitemap 里会出现一批首页上根本没有的歌手页，两边对不上。
+        for singer in singer_library.home_singers():
+            if singer.link not in seen:
+                urls.append((singer.link, 'weekly', '0.6'))
+                seen.add(singer.link)
+        for page in range(1, singer_library.total_pages() + 1):
+            path = singer_library.page_url(page)
+            if path not in seen:
+                urls.append((path, 'daily', '0.8'))
+                seen.add(path)
         try:
             data = Music2t58Spider().fetch_home()
-            for singer in data.get('hot_singers', []):
-                if singer.get('link') and singer['link'] not in seen:
-                    urls.append((singer['link'], 'weekly', '0.6'))
-                    seen.add(singer['link'])
             for song in data.get('rising_songs', []) + data.get('trending_songs', []):
                 if song.get('link') and song['link'] not in seen:
                     urls.append((song['link'], 'weekly', '0.6'))
                     seen.add(song['link'])
         except Exception:
-            pass  # 爬虫失败：仅返回静态 URL
+            pass  # 爬虫失败：歌手与静态 URL 照旧输出
         cache.set(SITEMAP_CACHE_KEY, urls, SITEMAP_CACHE_TTL)
     lines = ['<?xml version="1.0" encoding="UTF-8"?>',
              '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']

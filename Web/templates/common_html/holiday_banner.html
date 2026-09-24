@@ -1,0 +1,84 @@
+{% comment %}
+节日祝福横幅（喇叭通知，多条祝福语首尾相接地横向滚动）
+
+只在节日当天渲染 —— 由 services/holiday.py 按日期判定，非节日整段不输出。
+滚动哪几条、要不要显示，全部由服务端决定（见 Web/data/holiday_greetings.json），
+模板只负责画出来。
+
+滚动方式：
+  一组祝福语首尾相接地滚过去，滚完一组立刻接上下一组，所以需要两份以上完全相同的内容，
+  位移量正好等于「一组的宽度」，接缝处看不出断点。这里先渲染两组，
+  一组不够铺满一屏时由下面的内联脚本再补几组，并把位移量与时长算准。
+
+「当天已关闭」记在 localStorage.bz_holiday_bar 里存当天日期：
+  日期相同 → 今天关过了，不显示；
+  日期不同 → 视为过期，顺手清掉标记再显示，所以节日过后不需要服务端清理，
+             下一个节日会自动重新出现。
+  预览模式（?bz_preview=）不读也不写这个标记，只看效果、不污染真实状态。
+
+为什么初始是 hidden：
+  先藏后由紧随其后的内联脚本决定是否显示，避免「用户已关闭 → 每次进页面又闪一下」。
+  注意 hidden 不能和 flex 挂在同一个元素上 —— Tailwind 里二者都是 display 声明，
+  谁在样式表里靠后谁生效，与 class 书写顺序无关。所以外层只管 hidden，布局类放内层。
+{% endcomment %}
+{% if DAY_IS_HOLIDAY and HOLIDAY_GREETINGS %}
+<div id="bz-holiday-bar" class="hidden border-b border-primary/25 bg-primary/10">
+    <div class="mx-auto flex w-full max-w-6xl items-center gap-2 px-3 py-2 text-sm sm:px-4">
+        <i class="fa fa-bullhorn shrink-0 text-primary" aria-hidden="true"></i>
+
+        <div class="bz-marquee min-w-0 flex-1">
+            <div class="bz-marquee-track" id="bz-holiday-track">
+                <div class="bz-marquee-group">
+                    {% for g in HOLIDAY_GREETINGS %}<span class="bz-marquee-item">{{ g }}</span>{% endfor %}
+                </div>
+                {# 第二组是给滚动接缝用的副本，读屏软件念一遍就够了 #}
+                <div class="bz-marquee-group" aria-hidden="true">
+                    {% for g in HOLIDAY_GREETINGS %}<span class="bz-marquee-item">{{ g }}</span>{% endfor %}
+                </div>
+            </div>
+        </div>
+
+        <button type="button" id="bz-holiday-close" class="btn btn-ghost btn-xs btn-circle shrink-0"
+            aria-label="关闭节日祝福">
+            <i class="fa fa-times" aria-hidden="true"></i>
+        </button>
+    </div>
+</div>
+<script>
+    (function () {
+        var bar = document.getElementById('bz-holiday-bar');
+        if (!bar) return;
+        var preview = !!(window.BZ_DAY && window.BZ_DAY.preview);
+
+        if (!preview) {
+            try {
+                // 今天已经关过了就别再显示；否则清掉过期标记（节日过了自动失效）
+                if (localStorage.getItem('bz_holiday_bar') === window.BZ_TODAY) return;
+                localStorage.removeItem('bz_holiday_bar');
+            } catch (e) { /* 隐私模式等忽略：按「未关闭」处理 */ }
+        }
+        bar.classList.remove('hidden');
+
+        /* 算准滚动参数：一组文案不够铺满一屏就再补几组，保证首尾总能接上；
+         * 位移量 = 一组的宽度（滚过一组正好接回起点），速度约 60px/秒，每条都来得及看完。 */
+        var track = document.getElementById('bz-holiday-track');
+        var group = track.firstElementChild;
+        var groups = Math.max(2, Math.ceil(track.parentNode.clientWidth / group.offsetWidth) + 1);
+        for (var i = 2; i < groups; i++) {
+            var clone = group.cloneNode(true);
+            clone.setAttribute('aria-hidden', 'true');
+            track.appendChild(clone);
+        }
+        var shift = track.scrollWidth / groups;
+        track.style.setProperty('--bz-shift', -shift + 'px');
+        track.style.setProperty('--bz-dur', (shift / 60).toFixed(1) + 's');
+
+        document.getElementById('bz-holiday-close').addEventListener('click', function () {
+            if (!preview) {
+                try { localStorage.setItem('bz_holiday_bar', window.BZ_TODAY); } catch (e) { /* 忽略 */ }
+            }
+            bar.remove();
+        });
+    })();
+</script>
+{% endif %}

@@ -1,54 +1,64 @@
 {% extends 'template.html' %}
 
-{% block title %}{{ title }} - 免费音乐排行榜 - 爱听音乐网{% endblock %}
-{% block keywords %}{{ title }},新歌榜,TOP榜单,歌曲排行榜,网络热门歌曲,流行音乐排行,免费音乐,免费听歌,在线听歌,免费音乐在线听,爱听音乐网,杯子音乐网{% endblock %}
-{% block description %}爱听音乐网（杯子音乐网）{{ title }},提供最新{{ title }}歌曲排行榜,网络热门歌曲,新歌速递,流行音乐排行,免登录免费在线听完整歌曲,支持榜单歌曲MP3下载。{% endblock %}
+{% block title %}{{ title }} - 免费音乐排行榜 - {{ SITE_NAME_ALT }}{% endblock %}
+{% block keywords %}{{ title }},新歌榜,TOP榜单,歌曲排行榜,网络热门歌曲,流行音乐排行,免费音乐,免费听歌,在线听歌,免费音乐在线听,{{ SITE_NAME_ALT }},{{ SITE_NAME }}{% endblock %}
+{% block description %}{{ SITE_BRAND }}{{ title }},提供最新{{ title }}歌曲排行榜,网络热门歌曲,新歌速递,流行音乐排行,免登录免费在线听完整歌曲,支持歌词同步滚动。{% endblock %}
+{% block og_title %}{{ title }} - 免费音乐排行榜 - {{ SITE_NAME_ALT }}{% endblock %}
+{% block og_description %}{{ SITE_BRAND }}{{ title }},提供最新歌曲排行榜、网络热门歌曲与流行音乐排行,免登录免费在线听完整歌曲。{% endblock %}
+{% block robots %}{% if songs %}index, follow{% else %}noindex, follow{% endif %}{% endblock %}
 
 {% block content %}
-<div class="main">
-    <div class="layui-container">
-        {% if hot_rankings %}
-        <!-- 热榜合集（原模块名：热门榜单） -->
-        <div class="bz-filter">
-            <li>
-                <span>榜单合辑</span>
-                {% for item in hot_rankings %}
-                <a href="{{ item.link }}" {% if item.current %}class="current"{% endif %}>{{ item.title }}</a>
-                {% endfor %}
+<div class="mx-auto w-full max-w-6xl px-4">
+
+    {# 面包屑：帮助搜索引擎理解层级，也给用户一个返回入口 #}
+    <div class="breadcrumbs pt-4 text-sm">
+        <ul><li><a href="/">首页</a></li><li>榜单</li><li>{{ page_title }}</li></ul>
+    </div>
+
+    {% if hot_rankings %}
+    {# 榜单合辑：33 个榜单以胶囊云方式平铺，当前榜单高亮 #}
+    <section class="mt-2 rounded-box border border-base-300 bg-base-100 p-4">
+        <h2 class="mb-3 flex items-center gap-2 text-sm font-semibold opacity-60">
+            <i class="fa fa-list-ul text-primary"></i>榜单合辑
+        </h2>
+        <div class="flex flex-wrap gap-2">
+            {% for item in hot_rankings %}
+            <a href="{{ item.link }}"
+                class="btn btn-xs {% if item.current %}btn-primary{% else %}btn-ghost bg-base-200{% endif %}">{{ item.title }}</a>
+            {% endfor %}
+        </div>
+    </section>
+    {% endif %}
+
+    <section class="mt-4 rounded-box border border-base-300 bg-base-100 p-5">
+        <header class="mb-4 flex flex-wrap items-baseline gap-3 border-b border-base-300 pb-3">
+            <h1 class="text-xl font-bold">{{ page_title }}</h1>
+            {% if songs %}<span class="text-xs opacity-60">本页 {{ songs|length }} 首</span>{% endif %}
+        </header>
+
+        {% if songs %}
+        <ol class="gap-x-8 sm:columns-2 lg:columns-3">
+            {% for song in songs %}
+            <li class="break-inside-avoid">
+                <a class="flex items-center gap-3 rounded-field px-2 py-2 transition hover:bg-base-200"
+                    href="{{ song.link }}" title="{{ song.title }}">
+                    <span class="w-6 shrink-0 text-right text-xs tabular-nums {% if forloop.counter <= 3 %}font-bold text-primary{% else %}opacity-45{% endif %}">{{ forloop.counter }}</span>
+                    <span class="truncate text-sm">{{ song.title }}</span>
+                </a>
             </li>
+            {% endfor %}
+        </ol>
+        {% else %}
+        {% comment %}
+        空态必须放在列表容器之外：容器用的是 CSS 多列（columns-*）而不是 grid，
+        col-span-full 在里面完全不生效，空态会被挤进第一列。
+        {% endcomment %}
+        <div class="py-16 text-center opacity-50"><i class="fa fa-music fa-2x"></i>
+            <p class="mt-2 text-sm">暂无榜单数据，请稍后重试</p>
         </div>
         {% endif %}
-        <!-- 榜单歌曲列表（标题由后端映射：{{ page_title }}） -->
-        <div class="bz-card bz-gap">
-            <div class="bz-title">
-                <h1>{{ page_title }}</h1>
-            </div>
-            <div class="bz-song-list">
-                <ul>
-                    {% for song in songs %}
-                    <li>
-                        <i class="snum">{{ forloop.counter }}</i>
-                        <div class="sname"><a href="{{ song.link }}" title="{{ song.title }}">{{ song.title }}</a></div>
-                        <span class="sico">
-                            <a href="javascript:;" class="bz-act bz-play-ico" title="播放"><i class="fa fa-play"></i></a>
-                            <a href="javascript:;" class="bz-act bz-add" title="加入播放列表"><i class="fa fa-plus"></i></a>
-                            <a href="javascript:;" class="bz-act bz-like" title="喜欢"><i class="fa fa-heart-o"></i></a>
-                        </span>
-                    </li>
-                    {% empty %}
-                    <div class="bz-empty"><i class="fa fa-music"></i>暂无榜单数据，请稍后重试</div>
-                    {% endfor %}
-                </ul>
-            </div>
-            {% if pagination.links %}
-            <div class="bz-pager">
-                {% for link in pagination.links %}
-                <a class="{{ link.class }}" {% if link.href %}href="{{ link.href }}"{% endif %}>{{ link.text }}</a>
-                {% endfor %}
-            </div>
-            {% endif %}
-        </div>
-    </div>
+
+        {% include 'common_html/pager.html' %}
+    </section>
 </div>
-{% include 'common_html/footer.html' %}
 {% endblock %}

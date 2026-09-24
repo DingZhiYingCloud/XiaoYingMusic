@@ -142,7 +142,7 @@ urlpatterns = [
 ```
 - 复用现有 CSS 类名(`.main`/`.layui-container`/`.play_list`/`.page` 等),不自创新类
 - 末尾 `{% include 'common_html/footer.html' %}`
-- 详情页模板参考 `singer.html` / `playlist.html` 结构
+- 详情页模板参考 `singer.html` / `song.html` 结构
 
 ## 交付说明
 实施完成后,向用户输出:
