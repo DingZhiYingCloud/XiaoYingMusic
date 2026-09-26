@@ -110,6 +110,46 @@ class _SourceIPAdapter(HTTPAdapter):
                                        block=block, **kwargs)
 
 
+class _SourceThrottled(Exception):
+    """本次回源被主动放弃：领不到出站令牌，或已超时间预算（见 SOURCE_QPS / REQUEST_BUDGET）
+
+    刻意与"抓取失败"区分开：这两种情况都**不是源站的错**，所以既不能把源站标记成冷却
+    （那只会让接下来的请求白白少一条路），也不能当成"这个关键词查不到"写进负缓存。
+    调用方对它的处理统一是：立刻放弃这次回源，页面按空数据渲染。
+    """
+
+
+class _RateLimiter:
+    """进程内令牌桶：每秒放 qps 个令牌，领不到就等，等不过 max_wait 就抛 _SourceThrottled
+
+    为什么用令牌桶而不是"每次 sleep 固定间隔"：固定 sleep 只能把请求排成整齐的间隔，
+    拦不住突发；令牌桶允许突发消耗已积累的令牌，又能把长期速率压在平均值上。
+
+    为什么是进程内：跨进程要么锁文件要么上 Redis，为一个"别把源站打太狠"的软目标
+    不值得。每个进程各限各的，全站上限 = 进程数 × qps。
+    """
+
+    def __init__(self, qps, max_wait):
+        self._interval = 1.0 / qps if qps > 0 else 0.0
+        self._max_wait = max_wait
+        self._next_at = 0.0            # 下一个令牌可用的时刻（time.monotonic）
+        self._lock = threading.Lock()
+
+    def acquire(self):
+        """领一个令牌；要等的时间超过 max_wait 就抛 _SourceThrottled（且不占用令牌）"""
+        if not self._interval:
+            return
+        with self._lock:
+            now = time.monotonic()
+            wait = max(0.0, self._next_at - now)
+            if wait > self._max_wait:
+                raise _SourceThrottled(
+                    f'回源节流：需等 {wait:.1f}s，超过上限 {self._max_wait}s')
+            self._next_at = max(now, self._next_at) + self._interval
+        if wait > 0:
+            time.sleep(wait)
+
+
 class Music2t58Spider:
     """2t58.com 首页数据爬虫
 
@@ -162,6 +202,64 @@ class Music2t58Spider:
     # 兜底源的冷却到期时间。**与第一层分开记**：第一层恢复了不该让兜底层陪着一起等，
     # 反之亦然（两边是不同机房的独立站点，可达性互不相关）。
     FALLBACK_BAD_CACHE_KEY = '2t58_bad_fallbacks'
+
+    # ============ 巨量代理：直连失败后的备用线路 ============
+    # 某条源直连拿不到时，换这条线路对**同一条源**再试一遍（页面与播放接口都是）。
+    #
+    # 为什么第一层也挂：源站是按**来源 IP** 封的（见 _SourceIPAdapter），实测被封时
+    # 两个域名一起直连不通（TCP 丢包 / 直接 444）。2026-09-26 实测：这种状态下经代理
+    # 节点访问 music.2t58.com **能正常过验证并拿到真实页面**（8 条节点里 3 条可用），
+    # 所以代理不是"没意义"，而是直连被封时唯一还能出数据的路。
+    # 已知限制：代理服务商自己挡了 www.2t58.com（HTTPS 层 403，且 http://example.com/
+    # 经同一代理返回的错误页一模一样，是代理侧 ACL），所以挂代理时通常只有 music 这条
+    # 能成 —— 这是正常的，不代表代码有问题。
+    #
+    # 为什么一次取多条、逐条试：这是动态代理，平台文档明确"节点到期后连接会失败，
+    # 需重新提取"；实测一批节点里确实有连 TLS 握手都过不去的。所以**每次直连失败都实时
+    # 重新提取一批**（不做任何缓存，取回来的节点过期即弃），挨个试，一条不通就换下一条，
+    # 而不是逮着同一条反复重试。
+    #
+    # 接口在平台侧（小影 API），巨量的业务编号/密钥/代理账密都由平台 .env 持有，
+    # 调用方**什么都不用填**，只需平台签名（复用 Web/services/xiaoying_api）。
+    # 取不到时静默降级 —— 代理只是备用线路，它自己出问题不该影响原有的直连行为。
+    PROXY_API_PATH = '/api/ProxyIp/juliang/proxies'
+    # 一次提取几条节点来试（.env 可调）。实测单条节点约 4/5 可用，取 3 条基本够。
+    PROXY_NODE_COUNT = int(os.getenv('MUSIC_2T58_PROXY_NODES', '3'))
+
+    # ============ 回源节流与快速失败（防 502）============
+    # 背景：源站封我们的根因就是回源太密 —— 2026-09-26 一天 1.5 万次 /song/ 请求、其中
+    # 1.3 万个是不同页面、绝大多数来自同一个爬虫 UA，缓存几乎不命中。出口被封之后每次
+    # 回源都要先等连接超时，4 个 worker 很快被占满，nginx 等不到上游响应头 → 全站 502。
+    # 下面三组配置分别对应"少发点"、"别死等"、"别拖过 nginx 的超时"。
+
+    # 出站节流：向源站发请求前先领一个令牌（令牌桶，见 _RateLimiter）。
+    # 只作用于源站的 HTTP 请求；平台代理接口与第三方歌词接口都不限。
+    # ⚠️ 这是**进程内**限速，全站上限 = 进程数 × 该值（当前 4 × 2 = 8 QPS）；填 0 关闭。
+    SOURCE_QPS = float(os.getenv('MUSIC_2T58_SOURCE_QPS', '2'))
+    # 领不到令牌时最多等多久（秒），等不到就放弃本次回源而不是继续排队 —— 排队等下去
+    # 只会把 worker 越占越久，最后还是 502。
+    THROTTLE_MAX_WAIT = float(os.getenv('MUSIC_2T58_THROTTLE_MAX_WAIT', '5'))
+
+    # 连接超时 / 读取超时（秒）。被封时源站是**丢包**，connect 会一直卡到超时，
+    # 所以 connect 取小值快速失败；页面本身只有几十 KB，read 给 10 秒足够。
+    CONNECT_TIMEOUT = float(os.getenv('MUSIC_2T58_CONNECT_TIMEOUT', '5'))
+    READ_TIMEOUT = float(os.getenv('MUSIC_2T58_READ_TIMEOUT', '10'))
+    TIMEOUT = (CONNECT_TIMEOUT, READ_TIMEOUT)
+
+    # 经代理时的读取超时单独取小值：代理节点里有一部分是"连得上但不返数据"的半死节点，
+    # 只能挂到 read 超时才失败。实测可用的节点响应都在 1-3 秒内，所以 6 秒足够，
+    # 卡住就赶紧换下一个节点 —— 一批节点全卡满 10 秒，耗时直接翻倍（实测 3 个节点要 53 秒）。
+    PROXY_READ_TIMEOUT = float(os.getenv('MUSIC_2T58_PROXY_READ_TIMEOUT', '6'))
+    PROXY_TIMEOUT = (CONNECT_TIMEOUT, PROXY_READ_TIMEOUT)
+
+    # 一次回源（一个页面 / 一次播放信息）的总时间预算（秒）：把所有源、所有代理节点
+    # 全算进去，超过就立刻放弃、把页面渲染出来（数据可能少一块）。
+    # ⚠️ 必须明显小于 nginx 的 60 秒，否则又会 502。
+    REQUEST_BUDGET = float(os.getenv('MUSIC_2T58_REQUEST_BUDGET', '25'))
+
+    # 上面三组配置共用的令牌桶（延迟到首次用时才建，进程内单例）
+    _LIMITER = None
+    _LIMITER_LOCK = threading.Lock()
 
     # 模拟浏览器请求头，避免基础反爬拦截
     # Referer 固定写 www：实测 play.php 的 Referer **不必**与目标域名一致，
@@ -376,6 +474,28 @@ class Music2t58Spider:
         logger.warning('%s %s 抓取失败，冷却 %s 秒后重试：%s',
                        label, base, self.DOMAIN_COOLDOWN, reason)
 
+    @classmethod
+    def _limiter(cls):
+        """进程内令牌桶单例（见 _RateLimiter / SOURCE_QPS）"""
+        with cls._LIMITER_LOCK:
+            if cls._LIMITER is None:
+                cls._LIMITER = _RateLimiter(cls.SOURCE_QPS, cls.THROTTLE_MAX_WAIT)
+            return cls._LIMITER
+
+    def _throttle(self):
+        """发往源站前先领一个出站令牌；领不到直接抛 _SourceThrottled（快速失败）"""
+        self._limiter().acquire()
+
+    def _timeout_for(self, proxies):
+        """经代理时用更短的读超时（见 PROXY_READ_TIMEOUT），直连用常规超时"""
+        return self.PROXY_TIMEOUT if proxies else self.TIMEOUT
+
+    @staticmethod
+    def _check_budget(deadline):
+        """超过本次回源的时间预算就放弃（见 REQUEST_BUDGET）"""
+        if time.monotonic() >= deadline:
+            raise _SourceThrottled('本次回源已超时间预算')
+
     def _get_html(self, path, fallback_path=None):
         """抓页面：先按第一层域名顺序试，**全都拿不到才走兜底源**
 
@@ -385,21 +505,36 @@ class Music2t58Spider:
 
         路径由本方法决定而不让调用方拼好整条 URL：否则切了域名还在用旧域名。
 
+        每条源都是**先直连、直连失败再实时取巨量代理试一遍**（见 _retry_via_proxy）；
+        代理救回来时**不**冷却这条源 —— 那说明源站本身没问题，是我们自己的直连出口不通，
+        冷却它只会让接下来的请求白白少一条路。整个过程受 REQUEST_BUDGET 约束，超预算
+        就快速失败，避免把 worker 拖到 nginx 超时（那是 502 的直接成因）。
+
         什么算硬失败：请求抛异常（连接超时、被拒、HTTP 4xx/5xx）或人机验证过不去。
         刻意**不**把"页面抓回来了但解析不出内容"也算失败 —— 同一层里的各条域名跑的是
         同一套程序（兜底源也是同族站点），解析规则一旦失效会同时影响它们，切了也救不了；
         而空结果在搜索页是合法的。
         """
+        deadline = time.monotonic() + self.REQUEST_BUDGET
         first_error = None
         for base in self._alive_bases(self.DOMAINS, self.DOMAIN_BAD_CACHE_KEY):
+            url = f'{base}{path}'
+            self._check_budget(deadline)
             try:
-                return self._fetch_html(f'{base}{path}')
+                return self._fetch_html(url)
+            except _SourceThrottled:
+                raise                       # 不是源站的错，不冷却，直接快速失败
             except Exception as e:
-                self._mark_base_bad(base, self.DOMAIN_BAD_CACHE_KEY, '源站域名', e)
                 first_error = e
-        return self._fetch_from_fallback(fallback_path or path, first_error)
+            html = self._retry_via_proxy(
+                lambda proxies: self._fetch_html(url, proxies=proxies),
+                f'源站页面 {url}', deadline)
+            if html is not None:
+                return html
+            self._mark_base_bad(base, self.DOMAIN_BAD_CACHE_KEY, '源站域名', first_error)
+        return self._fetch_from_fallback(fallback_path or path, first_error, deadline)
 
-    def _fetch_from_fallback(self, path, first_error):
+    def _fetch_from_fallback(self, path, first_error, deadline):
         """走兜底源抓页面；兜底源也失败时抛错
 
         为什么放在最后才走：兜底源是别人家的站、页面又是同族程序的另一个版本，
@@ -408,22 +543,99 @@ class Music2t58Spider:
         第一层"全部在冷却中"（一条都没试）同样会走到这里：冷却本身就表示这些域名
         当前不可用，这时不去兜底，页面就只能一直显示维护提示了。
 
+        每条兜底源都是**先直连、直连不通才挂巨量代理**（见 _retry_via_proxy），
+        两条线路都失败才把这条源标记冷却 —— 只有代理救回来时**不**冷却：那说明源站
+        本身没问题，是我们自己的直连线路不通，冷却它只会让接下来的请求白白少一条路。
+
         抛错时优先抛第一层那个：那才是根因，兜底失败通常只是连带结果。
         """
         last_error = None
         for base in self._alive_bases(self.FALLBACK_BASES, self.FALLBACK_BAD_CACHE_KEY):
+            url = f'{base}{path}'
+            self._check_budget(deadline)
             try:
-                html = self._fetch_html(f'{base}{path}', session=self.fallback_session)
-                return self._rewrite_fallback_html(html)
+                return self._rewrite_fallback_html(
+                    self._fetch_html(url, session=self.fallback_session))
+            except _SourceThrottled:
+                raise
             except Exception as e:
-                self._mark_base_bad(base, self.FALLBACK_BAD_CACHE_KEY, '兜底源', e)
                 last_error = e
+            html = self._retry_via_proxy(
+                lambda proxies: self._fetch_html(url, session=self.fallback_session,
+                                                 proxies=proxies),
+                f'兜底源页面 {url}', deadline)
+            if html is not None:
+                return self._rewrite_fallback_html(html)
+            self._mark_base_bad(base, self.FALLBACK_BAD_CACHE_KEY, '兜底源', last_error)
         if last_error is None:
             raise RuntimeError(
                 f'兜底源全部处于冷却中，{self.DOMAIN_COOLDOWN} 秒后自动重试：{path}')
         raise first_error or last_error
 
-    def _fetch_html(self, url, session=None):
+    # ============ 巨量代理线路（备用通道，配置见 PROXY_API_PATH）============
+    @classmethod
+    def _proxy_pool(cls):
+        """实时提取一批巨量代理节点，返回能直接传给 requests 的 proxies 列表
+
+        每次调用都重新提取、**不做任何缓存**：动态代理到期即失效，缓存下来只会拿到
+        一批死节点（见 PROXY_API_PATH）。
+
+        取不到（平台没配签名、接口报错、返回空）一律返回空列表，由调用方静默降级 ——
+        代理是备用线路，它自己出问题不该改变原有的直连行为。
+        """
+        try:
+            from Web.services.xiaoying_api import auth_params, API_BASE
+        except ImportError:      # 脱离 Django 环境（独立脚本）时没有这个模块，直接降级
+            return []
+        try:
+            resp = requests.get(
+                f'{API_BASE}{cls.PROXY_API_PATH}',
+                params=auth_params({'num': cls.PROXY_NODE_COUNT}),
+                timeout=10,
+            )
+            data = resp.json()
+        except (requests.RequestException, ValueError) as e:
+            logger.warning('提取巨量代理失败，本次只走直连：%s', e)
+            return []
+        if data.get('code') != 10000:
+            logger.warning('提取巨量代理被拒绝，本次只走直连：%s', data.get('msg'))
+            return []
+        pool = []
+        for item in (data.get('data') or {}).get('proxies') or []:
+            node = item.get('proxy')
+            if node:
+                pool.append({'http': node, 'https': node})
+        return pool
+
+    def _retry_via_proxy(self, call, what, deadline):
+        """直连失败后，实时取一批巨量代理节点逐个重试；全部失败返回 None
+
+        call(proxies) 由调用方提供：返回 None 或抛异常都算这一次没成。
+        节点现取现用、不缓存，一条不通就换下一条 —— 动态代理本来就短命，
+        逮着同一条反复重试没有意义。
+
+        deadline 是本次回源的总截止时间（time.monotonic）：到点就不再换节点，直接抛
+        _SourceThrottled 快速失败。否则一批节点轮完（每个都要等超时）会把 worker
+        拖过 nginx 的 60 秒，那正是 502 的成因。
+        """
+        pool = self._proxy_pool()
+        for proxies in pool:
+            self._check_budget(deadline)
+            node = proxies['http'].rsplit('@', 1)[-1]   # 只留 ip:port，账密不进日志
+            try:
+                result = call(proxies)
+            except _SourceThrottled:
+                raise
+            except Exception as e:
+                logger.warning('%s 经代理 %s 失败：%s', what, node, e)
+                continue
+            if result is not None:
+                logger.info('%s 经代理 %s 成功', what, node)
+                return result
+            logger.warning('%s 经代理 %s 未取到数据', what, node)
+        return None
+
+    def _fetch_html(self, url, session=None, proxies=None):
         """抓单个 URL 的页面 HTML，自动处理人机验证（不做切换）
 
         目标站点验证机制：首次访问返回含 csrf_token 的验证页，
@@ -431,15 +643,19 @@ class Music2t58Spider:
         验证状态在 session 中保留约 1 小时。**每条域名各有一套验证状态**（Cookie 按
         域名分域存放），所以切域名之后会自动在新域名上重新过一次验证。
         兜底源是另一个域、另一套 Cookie，所以走它自己的 session（见 _fallback_session）。
+
+        proxies 是备用线路传进来的：过验证的 POST 必须跟着走同一个代理，
+        否则验证请求会从另一个出口 IP 发出去，源站看到 IP 变了会重新弹验证。
         """
         session = session or self.session
-        resp = session.get(url, timeout=10)
+        self._throttle()
+        resp = session.get(url, timeout=self._timeout_for(proxies), proxies=proxies)
         resp.raise_for_status()
         # 优先用 Content-Type 声明的编码；无声明（requests 默认 ISO-8859-1）时回退到 chardet 检测
         html = self._fix_encoding(resp).text
         # 命中人机验证页时，提交表单通过验证后重新请求原页面
         if 'csrf_token' in html and '安全人机验证' in html:
-            html = self._pass_verification(url, html, session=session)
+            html = self._pass_verification(url, html, session=session, proxies=proxies)
         # 过完验证仍是验证页 → PHPSESSID 失效或源站改了验证流程，这次抓取是失败的。
         # 必须报错，不能把验证页当正常页面返回：验证页里没有结果列表，曲库会把
         # 「空结果」当成「这个关键词查不到」打上负缓存（默认 12 小时内不再回源），
@@ -449,7 +665,7 @@ class Music2t58Spider:
             raise RuntimeError(f'人机验证未通过（PHPSESSID 可能已过期）：{url}')
         return html
 
-    def _pass_verification(self, url, html, session=None):
+    def _pass_verification(self, url, html, session=None, proxies=None):
         """提交人机验证表单（csrf_token + human_check），返回通过验证后的真实页面 HTML
 
         关键：POST 必须带 Referer + Origin 头，否则服务端返回 200 验证页（不跳转），
@@ -466,14 +682,18 @@ class Music2t58Spider:
         csrf_token = csrf_nodes[0].get('value', '')
         origin = urllib.parse.urlparse(url).scheme + '://' + urllib.parse.urlparse(url).netloc
         # 勾选"我不是人机"并提交，session 自动保存验证状态
+        self._throttle()
         resp = session.post(url, data={'csrf_token': csrf_token, 'human_check': 'on'},
-                            headers={'Referer': url, 'Origin': origin}, timeout=10)
+                            headers={'Referer': url, 'Origin': origin},
+                            timeout=self._timeout_for(proxies), proxies=proxies)
         # 先修编码再判断中文标记：POST 回来的验证页一般是 GBK，requests 默认按
         # ISO-8859-1 解码时「安全人机验证」肯定匹配不上，就会漏掉下面的兜底 GET。
         resp = self._fix_encoding(resp)
         # 若 POST 跟随后仍是验证页，再 GET 一次兜底
         if '安全人机验证' in resp.text:
-            resp = self._fix_encoding(session.get(url, timeout=10))
+            self._throttle()
+            resp = self._fix_encoding(session.get(url, timeout=self._timeout_for(proxies),
+                                                  proxies=proxies))
         return resp.text
 
     @staticmethod
@@ -1028,16 +1248,30 @@ class Music2t58Spider:
         跟抓页面一样：先按第一层域名顺序试，**全都不行才走兜底源**。实测的坑：
         第一层里 www 返回的是**加密串**、music 返回的是**明文直链**（见 _play_url），
         兜底源回的也是明文 —— 拿到什么格式就按什么格式处理，不能只认加解密那条路。
+
+        第一层与兜底源**都**挂代理（proxy_fallback=True）：源站按出口 IP 封禁时两个域名
+        直连全不通，只有代理这条线路还能出数据（见 PROXY_API_PATH）。
+
+        整段受 REQUEST_BUDGET 约束；超预算就当作"这首这次拿不到播放信息"返回空，
+        页面照常渲染（只是没有播放器）—— 不能因为播放信息拿不到就把整页变成维护页。
         """
-        data = self._request_play_info(self.DOMAINS, self.DOMAIN_BAD_CACHE_KEY, '源站域名',
-                                       song_id, f'song/{song_id}.html', self.session)
-        if data is None:
-            # 兜底源：接口路径、参数、请求头完全一样，只有两处不同 ——
-            # id 要转码（见 _to_fallback_id）、歌曲页目录叫 t/ 而不是 song/。
-            fallback_id = self._to_fallback_id(song_id)
-            data = self._request_play_info(
-                self.FALLBACK_BASES, self.FALLBACK_BAD_CACHE_KEY, '兜底源',
-                fallback_id, f't/{fallback_id}.html', self.fallback_session)
+        deadline = time.monotonic() + self.REQUEST_BUDGET
+        try:
+            data = self._request_play_info(self.DOMAINS, self.DOMAIN_BAD_CACHE_KEY,
+                                           '源站域名', song_id, f'song/{song_id}.html',
+                                           self.session, proxy_fallback=True,
+                                           deadline=deadline)
+            if data is None:
+                # 兜底源：接口路径、参数、请求头完全一样，只有两处不同 ——
+                # id 要转码（见 _to_fallback_id）、歌曲页目录叫 t/ 而不是 song/。
+                fallback_id = self._to_fallback_id(song_id)
+                data = self._request_play_info(
+                    self.FALLBACK_BASES, self.FALLBACK_BAD_CACHE_KEY, '兜底源',
+                    fallback_id, f't/{fallback_id}.html', self.fallback_session,
+                    proxy_fallback=True, deadline=deadline)
+        except _SourceThrottled as e:
+            logger.warning('播放信息 %s 放弃回源：%s', song_id, e)
+            data = None
         if not data:
             return {'play_url': '', 'cover': '', 'cid': ''}
 
@@ -1047,34 +1281,58 @@ class Music2t58Spider:
             'cid': str(data.get('lkid', '')),
         }
 
-    def _request_play_info(self, bases, cache_key, label, song_id, song_path, session):
+    def _request_play_info(self, bases, cache_key, label, song_id, song_path, session,
+                           proxy_fallback=False, deadline=None):
         """按 base 顺序请求 play.php，返回第一个可用的响应；全都拿不到返回 None
 
         song_id 与 song_path 都必须用**该源自己的写法**，由调用方负责转码 ——
         两站的 id 形态不同，传错了不会报错，只会安静地返回另一首歌的数据。
+
+        proxy_fallback=True 时，某条源直连失败会再实时取巨量代理试一遍；
+        两条线路都失败才算这条源不可用、标记冷却 —— 只有代理救回来时不冷却，
+        理由同 _fetch_from_fallback。deadline 见 REQUEST_BUDGET。
         """
         for base in self._alive_bases(bases, cache_key):
-            try:
-                resp = session.post(
-                    f'{base}js/play.php',
-                    data={'id': song_id, 'type': 'music'},
-                    headers={
-                        'X-Requested-With': 'XMLHttpRequest',
-                        # Referer 用当前域名的歌曲页（实测不匹配也能用，但保持真实更稳）
-                        'Referer': f'{base}{song_path}',
-                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                    },
-                    timeout=10,
-                )
-                data = resp.json()
-            except (requests.RequestException, ValueError) as e:
-                self._mark_base_bad(base, cache_key, label, e)
-                continue
-            # 接口通了但没给数据：不判定域名坏（可能只是这首歌没有可播音频），
-            # 换下一条域名当场再试
-            if data.get('msg') == 1:
+            if deadline is not None:
+                self._check_budget(deadline)
+            data, error = self._post_play_info(base, song_id, song_path, session)
+            if error is not None and proxy_fallback:
+                data = self._retry_via_proxy(
+                    lambda proxies: self._post_play_info(
+                        base, song_id, song_path, session, proxies=proxies)[0],
+                    f'播放接口 {base}', deadline)
+            if data is not None:
                 return data
+            if error is not None:
+                self._mark_base_bad(base, cache_key, label, error)
         return None
+
+    def _post_play_info(self, base, song_id, song_path, session, proxies=None):
+        """请求一次 play.php，返回 (响应数据, 异常)
+
+        接口通了但 msg != 1（这首歌没有可播音源）时返回 (None, None)：那不是故障，
+        既不该触发代理重试，也不该把源站标记成坏的 —— 换下一条源当场再试即可。
+        """
+        try:
+            self._throttle()
+            resp = session.post(
+                f'{base}js/play.php',
+                data={'id': song_id, 'type': 'music'},
+                headers={
+                    'X-Requested-With': 'XMLHttpRequest',
+                    # Referer 用当前域名的歌曲页（实测不匹配也能用，但保持真实更稳）
+                    'Referer': f'{base}{song_path}',
+                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                },
+                timeout=self._timeout_for(proxies),
+                proxies=proxies,
+            )
+            data = resp.json()
+        except (requests.RequestException, ValueError) as e:
+            return None, e
+        if data.get('msg') == 1:
+            return data, None
+        return None, None
 
     def _fetch_lyrics(self, cid):
         """请求 lrc.php 获取 LRC 格式歌词文本（带时间标签，供前端 window.BZLrc 同步滚动）"""
