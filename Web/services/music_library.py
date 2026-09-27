@@ -142,6 +142,11 @@ def _render(keyword, page):
         'results': [row.song for row in rows],
         'total_results': state.total_results,
         'blocked': state.blocked,
+        # 源站不可达：这一页一个字都没爬下来（crawled_pages 还是 0），而且不是"源站明确说
+        # 查不到"（source_empty 是源站确认过的）。这两种"空"的提示必须分开 —— 前者说
+        # "没有找到该关键词"会误导（用户以为是没这首歌，其实是数据源暂时不可用），
+        # 模板据此换成"稍后重试"（见 search.html）。
+        'source_down': state.crawled_pages == 0 and not state.source_empty,
         'pagination': {'links': _pager_links(keyword, page, _pager_max(state))},
     }
 

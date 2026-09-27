@@ -50,7 +50,8 @@
         {% endcomment %}
         <div class="py-16 text-center opacity-50"><i class="fa fa-search fa-2x"></i>
             <p class="mt-2 text-sm">
-                {% if blocked %}该关键词未能提供搜索结果{% else %}没有找到「{{ keyword }}」相关歌曲{% endif %}，换个关键词试试吧
+                {# 三种"空"要分开说：数据源不可用不能说成"没找到这首歌" —— 那等于把源站的锅甩给用户 #}
+                {% if source_down %}数据源暂时不可用，请稍后重试{% elif blocked %}该关键词未能提供搜索结果，换个关键词试试吧{% else %}没有找到「{{ keyword }}」相关歌曲，换个关键词试试吧{% endif %}
             </p>
         </div>
         {% endif %}
