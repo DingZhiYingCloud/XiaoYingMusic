@@ -180,9 +180,15 @@ class Music2t58Spider:
     DOMAINS = [_normalize_base(d) for d in _env_list(
         'MUSIC_2T58_DOMAINS', 'https://www.2t58.com/,https://music.2t58.com/')]
 
-    # 某条域名硬失败后冷却多久才再试（秒）。冷却期内直接跳过它，
-    # 否则每个请求都要先在被封的域名上白等一次超时。
-    DOMAIN_COOLDOWN = int(os.getenv('MUSIC_2T58_DOMAIN_COOLDOWN', '300'))
+    # 某条源硬失败后冷却多久才再试（秒）。冷却期内直接跳过它，
+    # 否则每个请求都要先在被封的源上白等一次超时（connect 5s + read 10s）。
+    #
+    # 取值是"源站恢复后多快能自己好"与"多久白等一次超时"的折中：源站恢复后最坏要等一个
+    # 冷却期才会重新探测，所以不能太长（原来是 300，实测源站已恢复、站点还空白了 5 分钟）；
+    # 太短又会让每个冷却周期都白等一次超时。回源本身低频（SOURCE_QPS 限速），120 秒够用。
+    # 注意"部分恢复"的情形不用等这个时长：同一组里只要有一条成功，整组冷却会被立刻清掉
+    # （见 _clear_cooldown）。
+    DOMAIN_COOLDOWN = int(os.getenv('MUSIC_2T58_DOMAIN_COOLDOWN', '120'))
 
     # 各域名的冷却到期时间 {域名: 时间戳}，多进程共享（见 _alive_bases）
     DOMAIN_BAD_CACHE_KEY = '2t58_bad_domains'
@@ -557,6 +563,23 @@ class Music2t58Spider:
         logger.warning('%s %s 抓取失败，冷却 %s 秒后重试：%s',
                        label, base, self.DOMAIN_COOLDOWN, reason)
 
+    @classmethod
+    def _clear_cooldown(cls, cache_key):
+        """这一组里有源成功返回了，把整组冷却清掉
+
+        同组几条是**同生共死**的：几个域名跑的是同一套程序、在同一个机房，会被同一个故障
+        （出口被封、源站抖动）一起打挂。既然已经有一条通了，说明那阵子过去了，其余几条
+        大概率也恢复了。不清的话，最坏要白等整整一个冷却期 —— 实测踩到过：源站已经恢复，
+        两条域名还在冷却里，站点又空白好几分钟。
+
+        为什么**不**对出口 IP 那组也这么做：几个公网 IP 是各自独立的，`.28 通`并不代表
+        `.79` 也解封了。清了它的冷却，下次又要拿 `.79` 白等一次连接超时才重新标记，纯亏。
+
+        先读一次再决定写不写：平时（没有冷却标记）就只是读一下缓存，不产生写盘。
+        """
+        if cache.get(cache_key):
+            cache.set(cache_key, {}, cls.DOMAIN_COOLDOWN)
+
     # ============ 出口 IP 的选择与换绑（见 SOURCE_IPS）============
     @classmethod
     def _alive_source_ips(cls):
@@ -642,13 +665,17 @@ class Music2t58Spider:
                 self._check_budget(deadline)
                 self._bind_source_ip(self.session, ip)
                 try:
-                    return self._fetch_html(url)
+                    html = self._fetch_html(url)
                 except _SourceThrottled:
                     raise                   # 不是源站的错，不冷却，直接快速失败
                 except Exception as e:
                     first_error = e
                     if ip:
                         self._mark_base_bad(ip, self.SOURCE_IP_BAD_CACHE_KEY, '出口 IP', e)
+                else:
+                    # 抓到了 = 这组域名已经恢复，顺手把整组冷却清掉（见 _clear_cooldown）
+                    self._clear_cooldown(self.DOMAIN_BAD_CACHE_KEY)
+                    return html
             html = self._retry_via_proxy(
                 lambda proxies: self._fetch_html(url, proxies=proxies),
                 f'源站页面 {url}', deadline)
@@ -680,14 +707,18 @@ class Music2t58Spider:
                 self._check_budget(deadline)
                 self._bind_source_ip(self.fallback_session, ip)
                 try:
-                    return self._rewrite_fallback_html(
-                        self._fetch_html(url, session=self.fallback_session))
+                    html = self._fetch_html(url, session=self.fallback_session)
                 except _SourceThrottled:
                     raise
                 except Exception as e:
                     last_error = e
                     if ip:
                         self._mark_base_bad(ip, self.SOURCE_IP_BAD_CACHE_KEY, '出口 IP', e)
+                else:
+                    # 兜底源通了 = 它这一组已经恢复，清掉冷却（见 _clear_cooldown）。
+                    # 刻意不碰第一层的冷却：那是另一个机房，它通不代表第一层也通。
+                    self._clear_cooldown(self.FALLBACK_BAD_CACHE_KEY)
+                    return self._rewrite_fallback_html(html)
             html = self._retry_via_proxy(
                 lambda proxies: self._fetch_html(url, session=self.fallback_session,
                                                  proxies=proxies),
