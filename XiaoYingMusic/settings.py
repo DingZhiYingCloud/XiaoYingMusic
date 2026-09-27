@@ -50,7 +50,11 @@ MIDDLEWARE = [
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware', # 跨域请求中间件
     'django.middleware.common.CommonMiddleware',
-    # 'django.middleware.csrf.CsrfViewMiddleware',
+    # CSRF 校验：纯访客站时关着无所谓，自从有了登录态（喜欢功能）才真正需要它 ——
+    # 否则第三方页面能伪造「登录」与「喜欢」请求。站内现有 POST 只有 api/play/ended
+    # 与新增的 api/uc/*、/login、/register 等，都各自带了 csrf_token / X-CSRFToken。
+    # ⚠️ play_ended 上的 @csrf_exempt 是它提前预留的豁免，别删（见 views/request.py）。
+    'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
@@ -71,6 +75,7 @@ TEMPLATES = [
                 'Web.services.friend_links.friend_links', # 小影 API 友情链接（后端拉取+1小时缓存，渲染进HTML供搜索引擎可见）
                 'Web.services.site_info.site_info', # 站点名称/联系方式/统计ID（取自 .env，二开改名只改 .env）
                 'Web.services.hot_search.hot_keywords', # 热门搜索榜（header 搜索框下拉用，带 10 分钟缓存）
+                'Web.services.user_session.current_user_context', # 当前登录用户（header 的登录入口 / 昵称）
             ],
         },
     },
@@ -236,6 +241,27 @@ RANDOM_PICK_COUNT = int(os.getenv('RANDOM_PICK_COUNT', '18'))
 RANDOM_PICK_TTL_HOURS = float(
     os.getenv('CACHE_TTL_HOURS_HOME') or os.getenv('CACHE_TTL_HOURS') or '2'
 )
+
+
+# ============ 播放页本地缓存 +「大家正在听」（PlayedSong 表） ============
+# 目的：把"每打开一次播放页就回源抓一次"改成"优先读本地表"。除了音频直链和歌词
+# 在库里还没有时必须抓一次，其余统统走本地，减少回源、降低源站封 IP 的风险。
+# 数据来源与读写逻辑见 Web/services/played_songs.py，表结构见 Web/models.py 的 PlayedSong。
+# 「大家正在听」最多显示几条（展示截断，超出的不显示）
+PLAYED_SHOW_COUNT = int(os.getenv('PLAYED_SHOW_COUNT', '60'))
+# 「正在听」的展示窗口（分钟）：last_played_at 在这个时间之内才算"正在听"。
+# 它就是用户说的"一条数据只缓存 30 分钟"，过期的不再出现在列表里。
+PLAYED_SHOW_MINUTES = float(os.getenv('PLAYED_SHOW_MINUTES', '30'))
+# 直链新鲜度（分钟）：PlayedSong.play_url 超过这个时间就调一次 play.php 刷新
+# （CDN 直链本身 60~73 分钟失效，取 60 留点余量）。与上面的展示窗口是两个独立语义。
+PLAYED_URL_TTL_MINUTES = float(os.getenv('PLAYED_URL_TTL_MINUTES', '60'))
+# 表记录保留天数：整行超过这么久没被播放过就删掉（防止表无限增长）。
+# 清理由播放页上报时顺带触发（带冷却），不需要额外定时任务。
+PLAYED_KEEP_DAYS = float(os.getenv('PLAYED_KEEP_DAYS', '30'))
+# 「大家正在听」的自动刷新间隔（秒）：播放页开久了，那块列表的时间会停在旧值、新歌也进不来，
+# 所以前端按这个间隔去 /api/live 拉一次最新内容（只读本地表、不碰源站，可以设得比较勤）。
+# 0 = 关闭自动刷新（页面只在打开时渲染一次）。
+PLAYED_LIVE_REFRESH_INTERVAL = int(os.getenv('PLAYED_LIVE_REFRESH_INTERVAL', '120'))
 
 
 # ============ 缓存配置（爬虫数据缓存，减轻源站压力） ============

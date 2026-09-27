@@ -5,8 +5,10 @@ import zipfile
 from urllib.parse import quote
 
 from django.shortcuts import redirect, render
-from django.http import HttpResponse, HttpResponseBadRequest, StreamingHttpResponse
+from django.http import (HttpResponse, HttpResponseBadRequest, JsonResponse,
+                         StreamingHttpResponse)
 from django.core.cache import cache
+from django.template.loader import render_to_string
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
@@ -15,7 +17,8 @@ import requests
 
 from SpiderServices.Music_2t58.main import Music2t58Spider
 
-from Web.services import music_library, play_rank, singer_library
+from Web.services import (favorites, music_library, play_rank, played_songs,
+                          singer_library, user_session)
 
 
 # ============ 榜单名称映射（原名称 → 本站文艺风新名称） ============
@@ -109,17 +112,96 @@ def singer(request, sid, page=1):
 
 def song(request, sid):
     # 歌曲详情页：sid 为歌曲id（路径参数）
-    try:
-        data = Music2t58Spider().fetch_song(sid)
-    except Exception:
-        data = {
-            'song': {},
-            'play_url': '',
-            'lyrics': '',
-            'daily_recommend': [],
-        }
+    # 数据优先读本地 PlayedSong 表（见 Web/services/played_songs.py）：只有"这首还没缓存过"
+    # 或"直链过了新鲜期"才会回源，避免每打开一个播放页就往源站抓一次。
+    data = played_songs.get_for_page(sid)
     data['sid'] = sid  # 供模板下载弹窗拼接下载地址
+    user = user_session.current_user(request)   # 下面两处都要用，只取一次（省一次查询）
+    # 心形按钮的初始状态。未登录时 liked_sids 直接返回空集合，不必在这里判登录
+    data['liked'] = sid in favorites.liked_sids(user, [sid])
+    # 收藏时存下的标题快照，格式与各列表页一致（歌手 - 歌名）。在这里拼而不是模板里拼，
+    # 是因为歌手是列表、歌名可能为空，模板里写条件拼串太绕。
+    artists = data['song'].get('artists') or []
+    data['like_title'] = ' - '.join(p for p in ['/'.join(artists), data['song'].get('name')] if p)
+    # 连播队列（有「我的喜欢」用它，否则用「大家正在听」兜底）与「大家正在听」，都读本地库、不回源
+    now_listening = played_songs.now_listening()
+    data['now_listening'] = now_listening
+    data['playlist'] = _play_queue(user, now_listening)
     return render(request, 'song.html', data)
+
+
+def _play_queue(user, now_listening):
+    """播放页的连播队列
+
+    有「我的喜欢」就用它（最近喜欢的在前）；一首都没有（含未登录、含登录了没收藏）就用
+    「大家正在听」兜底 —— 同一批数据既在底部那块里展示、也当队列用，所以没收藏的人也能连着听。
+
+    返回 {kind, title, songs}，kind 决定队列在哪显示、右栏显示什么（见 song.html）：
+      kind = 'likes'  右栏渲染「我的喜欢」列表，队列就是它
+      kind = 'live'   队列是「大家正在听」（条目渲染在底部那块，右栏仍是空态/登录引导）
+      kind = 'empty'  两边都没有（没人正在听、也没有收藏），没有队列
+
+    title 恒为「我的喜欢」—— 它是**右栏那块**的标题，右栏永远是"我的喜欢"（有没有内容而已）；
+    「大家正在听」的标题写在底部那块模板里，不从这里出。
+    """
+    if user is not None:
+        liked = [{'sid': f.sid, 'title': f.title} for f in user.favorites.all()]
+        if liked:
+            return {'kind': 'likes', 'title': '我的喜欢', 'songs': liked}
+
+    songs = [{'sid': s.sid, 'title': s.title} for s in now_listening]
+    if songs:
+        return {'kind': 'live', 'title': '我的喜欢', 'songs': songs}
+    return {'kind': 'empty', 'title': '我的喜欢', 'songs': []}
+
+
+def song_info(request, sid):
+    """取一首歌的播放信息（JSON）—— 播放页连播"原地换歌"靠它
+
+    与播放页走同一条取数路径（played_songs.get_for_page）：优先读本地库，
+    只有首次播放或直链过期才回源，所以连播连着切歌也不会把源站打爆。
+
+    刻意**不要求登录**：谁都能点开播放页切歌。
+    拿不到直链时返回 ok=False，由前端提示并跳到下一首。
+    """
+    if not SID_PATTERN.match(sid):
+        return JsonResponse({'ok': False, 'msg': '歌曲参数不合法'}, status=400)
+
+    data = played_songs.get_for_page(sid)
+    play_url = data.get('play_url') or ''
+    if not play_url:
+        # 与播放页的兜底口径一致：拿不到直链就是"暂时听不了"，前端跳过这首继续
+        return JsonResponse({'ok': False, 'msg': '这首歌暂时没有可播的音频'})
+
+    song = data.get('song') or {}
+    return JsonResponse({
+        'ok': True,
+        'sid': sid,
+        'name': song.get('name') or '',
+        'artists': '/'.join(song.get('artists') or []),
+        'cover': song.get('cover') or '',
+        'singer_url': song.get('singer_url') or '',
+        'play_url': play_url,
+        'lyrics': data.get('lyrics') or '',
+    })
+
+
+def live_now(request):
+    """「大家正在听」的当前内容（JSON）
+
+    播放页开久了，那块列表的时间会停在旧值、新歌也进不来，所以前端定时来拉一次
+    （见 static/js/playlist.js 的 refreshLive，间隔 PLAYED_LIVE_REFRESH_INTERVAL）。
+
+    返回的是**渲染好的 HTML 片段**而不是数据：条目标记只有 common_html/live_items.html
+    一份，页面首次渲染与这里都用它，免得模板和 JS 各写一遍、慢慢跑偏。
+    HTML 由 Django 模板生成（变量默认转义），前端直接 replaceChildren 即可。
+    """
+    rows = played_songs.now_listening()
+    return JsonResponse({
+        'ok': True,
+        'count': len(rows),
+        'html': render_to_string('common_html/live_items.html', {'now_listening': rows}),
+    })
 
 
 def search(request, keyword, page=1):
@@ -174,6 +256,23 @@ def play_ended(request):
         return HttpResponseBadRequest('sid 不合法')
     play_rank.record(sid, request.POST.get('name', ''), request.POST.get('artists', ''),
                      _client_ip(request))
+    return HttpResponse(status=204)
+
+
+# 与 play_ended 同理：只接收 sid 并更新一行缓存、没有会话语义，保持 CSRF 豁免。
+@csrf_exempt
+@require_POST
+def play_start(request):
+    """开始播放回调：刷新这首歌在「大家正在听」里的时间（播放页那块列表的数据源）
+
+    播放页在 audio 的 play 事件里调它（见 static/js/song_player.js 的 reportStart），
+    同一首歌只上报一次，暂停后续播不重复发。不新建记录（播放前页面已经通过
+    played_songs.get_for_page 落过库），所以它不会触发任何回源。
+    """
+    sid = (request.POST.get('sid') or '').strip()
+    if not SID_PATTERN.match(sid):
+        return HttpResponseBadRequest('sid 不合法')
+    played_songs.report_start(sid)
     return HttpResponse(status=204)
 
 
@@ -403,8 +502,8 @@ def _build_sitemap_urls():
             seen.add(path)
             urls.append((path, freq, prio, lastmod))
 
-    # 首页歌手墙那 24 位，同时也是名册的前 24 位
-    singers = singer_library.home_singers()
+    # 用固定的一批歌手（名册前 24 位）而不是首页那块歌手墙：首页是随机抽的，sitemap 需要稳定
+    singers = singer_library.first_singers()
     if singers:
         # 首页可见内容跟着「今日热听榜」变；今天还没人听完任何一首就不写 lastmod
         add('/', 'daily', '1.0', play_rank.latest_play_at())

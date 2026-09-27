@@ -18,6 +18,7 @@
     {{ HOLIDAY_GREETINGS }}   横幅要滚动的祝福语列表（非节日为空列表）
     {{ STATIC_VERSION }}      output.css 的版本号（文件修改时间，用于刷新浏览器缓存）
     {{ SEARCH_KEYWORD_MAX_CHARS }} 搜索关键词最大长度（搜索框 maxlength 与后端截断共用）
+    {{ PLAYED_LIVE_REFRESH_INTERVAL }} 播放页「大家正在听」的自动刷新间隔（秒，0=不刷新）
 
 节日/季节与主题的对应关系见 Web/data/holidays.py，祝福语池见同目录的
 Web/data/holiday_greetings.json，解析逻辑见 Web/services/holiday.py。
@@ -69,4 +70,5 @@ def site_info(request):
         'HOLIDAY_GREETINGS': day.greetings,
         'STATIC_VERSION': _static_version(),
         'SEARCH_KEYWORD_MAX_CHARS': settings.SEARCH_KEYWORD_MAX_CHARS,
+        'PLAYED_LIVE_REFRESH_INTERVAL': settings.PLAYED_LIVE_REFRESH_INTERVAL,
     }

@@ -904,7 +904,6 @@ class Music2t58Spider:
             fallback_path=f't/{self._to_fallback_id(sid)}.html'))
 
         song_info = self._parse_song_info(tree)
-        daily = self._parse_daily_recommend(tree)
         play_info = self._fetch_play_info(sid)
         lyrics = self._fetch_lyrics(play_info['cid'])
 
@@ -924,7 +923,6 @@ class Music2t58Spider:
         return {
             'song': song_info,
             'lyrics': lyrics,
-            'daily_recommend': daily,
             # 顺带把本次取到的直链带回给 fetch_song：它已经为歌词/封面请求过 play.php，
             # 直接复用即可，不要让调用方再走一次短缓存（否则直链为空时会重复请求源站）。
             'play_url': play_info['play_url'],
@@ -949,6 +947,15 @@ class Music2t58Spider:
             'play_url': play_info['play_url'],
             'lyrics': lyrics,
         }
+
+    def fetch_play_url(self, sid):
+        """只向 play.php 要一次播放直链：不抓歌曲页、不取歌词（无缓存，总是最新）
+
+        用途：PlayedSong 里缓存的直链过期时用它刷新 —— 比 fetch_song 少一次页面请求、
+        少一次歌词请求，这正是"少打扰源站"的关键。封面/歌词/歌名沿用库里已有的。
+        拿不到时返回空串（_fetch_play_info 内部已兜住异常），调用方保留旧值即可。
+        """
+        return self._fetch_play_info(sid)['play_url']
 
     def _do_fetch_search(self, keyword, page):
         """抓取搜索结果页：结果列表 / 分页 / 是否被屏蔽（不带缓存）
@@ -1161,7 +1168,7 @@ class Music2t58Spider:
     def _parse_search_results(self, tree):
         """解析搜索结果列表：title / link / sid / name / singers
 
-        搜索结果与榜单、每日推荐用的是同一套行结构（见 _SONG_LIST_XPATH）。
+        搜索结果与榜单用的是同一套行结构（见 _SONG_LIST_XPATH）。
         title 保留源站原文（格式「歌手 - 歌名」）供列表直接渲染；
         另外拆出 sid / name / singers，让曲库入库时不必再解析一遍标题。
         """
@@ -1228,19 +1235,6 @@ class Music2t58Spider:
 
         return {'name': song_name, 'artists': artists, 'cover': cover,
                 'singer_url': singer_url}
-
-    def _parse_daily_recommend(self, tree):
-        """解析"每日推荐"歌曲列表：title / link
-
-        兜底源没有这个板块，解析结果为空 —— 歌曲页少一块推荐而已，不影响播放与主信息。
-        """
-        result = []
-        for li in tree.xpath(self._SONG_LIST_XPATH):
-            title, link = self._song_row(li)
-            if not title:
-                continue
-            result.append({'title': title, 'link': link})
-        return result
 
     def _fetch_play_info(self, song_id):
         """请求 play.php 获取播放信息：播放直链 / 封面图 / 歌词cid（带故障切换）

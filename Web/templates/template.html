@@ -113,11 +113,18 @@
     <link rel="stylesheet" href="/static/css/output.css?v={{ STATIC_VERSION }}" />
     <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
     {% comment %}
+    CSRF token：项目已启用 CsrfViewMiddleware（见 settings.py），页面里的异步 POST
+    （心形按钮、发验证码）必须带上它，否则 403。放在这里是为了让**每个**页面都下发
+    这个 meta 与 csrftoken cookie —— 播放页、列表页本身没有表单，光靠 {% csrf_token %}
+    是拿不到的。脚本统一从这里读，见 static/js/user.js。
+    {% endcomment %}
+    <meta name="csrf-token" content="{{ csrf_token }}">
+    {% comment %}
     全站不再依赖 jQuery（各脚本已全部用原生 JS 实现）。
     common.js 用 defer 加载：它要等 DOMContentLoaded 才做导航高亮，
     defer 能避免阻塞 HTML 解析，又不改变执行时机。
     {% endcomment %}
-    <script src="/static/js/common.js?v=v5" defer></script>
+    <script src="/static/js/common.js?v=v6" defer></script>
     {% block head %}{% endblock %}
 
 </head>
@@ -144,6 +151,11 @@
 
     {# 主题切换：面板由 theme.js 动态生成到 header 内的 [data-theme-menu] 容器 #}
     <script src="/static/js/theme.js?v=v6"></script>
+    {% comment %}
+    登录/注册的发验证码、以及各处心形按钮。全站加载：两个功能都"页面上有对应元素才生效"，
+    多这一次请求换掉"每个页面都要记着引用"的坑，脚本见 static/js/user.js。
+    {% endcomment %}
+    <script src="/static/js/user.js?v=v4"></script>
     {% block js %}{% endblock %}
 </body>
 

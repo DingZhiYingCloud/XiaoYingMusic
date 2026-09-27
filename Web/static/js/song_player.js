@@ -2,7 +2,10 @@
  * 背景：原全站底部悬浮播放条已移除，音乐只在歌曲详情页播放。
  * 功能：播放/暂停、进度拖拽、时间显示、音量与静音、倍速、歌词同步（window.BZLrc）、
  *       断点续播（刷新前正在播放则自动从断点继续，暂停状态则点击播放时从断点继续）、
+ *       开始播放上报一次（「大家正在听」的数据源，见 reportStart）、
  *       整首播完上报一次（首页「今日热听榜」的数据源，见 reportPlayed）。
+ * 连播：本文件只管"一首歌怎么放"；队列、上一首/下一首、循环开关、地址栏同步都在
+ *       playlist.js —— 它用 load() 换歌、用 onEnded() 注册"这首放完了"的回调。
  * 数据：由页面提供 window.BZ_SONG_DATA（sid / name / cover / play_url / lyrics）。
  */
 (function () {
@@ -48,6 +51,8 @@
     var elPlayBtn, elPlayIcon, elRateBtn, elMuteBtn, elMuteIcon;
     var elProgBar, elVolValue, elCurTime, elDuration, elCover, elStateSpan;
     var lastSave = 0;
+    var endedCb = null;   // 整首播完后的回调（由 playlist.js 注册，见文件头"连播"说明）
+    var startedSid = '';  // 已上报过"开始播放"的歌：同一首只报一次，暂停续播不重复发
 
     /* ---------- 渲染 ---------- */
     // 进度条/音量条的填充一律用 transform: scaleX 表示，而不是改 width：
@@ -137,6 +142,81 @@
         } catch (e) { /* 老浏览器没有 fetch / URLSearchParams，同样忽略 */ }
     }
 
+    /* ---------- 开始播放上报（「大家正在听」的数据源） ---------- */
+    // 按下播放时记一次"这首歌此刻正在被听"。同一首只报一次（暂停再播不重复发），
+    // 换到下一首会自动再报。失败一律吞掉，理由同 reportPlayed。
+    function reportStart() {
+        if (!data.sid || startedSid === data.sid) return;
+        startedSid = data.sid;
+        try {
+            var body = new URLSearchParams();
+            body.append('sid', data.sid);
+            fetch('/api/play/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: body.toString(),
+                keepalive: true
+            }).catch(function () { /* 忽略 */ });
+        } catch (e) { /* 同上 */ }
+    }
+
+    /* ---------- 换歌（连播用，由 playlist.js 调用）---------- */
+    // 页面上那些跟"当前是哪首歌"有关的东西（歌名、歌手、封面、浏览器标题）都要跟着换，
+    // 否则连播几首之后，页面显示的还停在最开始那一首上。
+    function renderSongInfo(song) {
+        var elName = document.querySelector('[data-bz-name]');
+        if (elName) {
+            elName.textContent = song.name || '';
+            elName.title = song.name || '';
+        }
+        var elSinger = document.querySelector('[data-bz-singer]');
+        if (elSinger) {
+            elSinger.textContent = song.artists || '';
+            elSinger.title = song.artists || '';
+            elSinger.href = song.singer_url || '#';
+        }
+        if (elCover && song.cover) {
+            elCover.src = song.cover;
+            elCover.alt = song.name || '';
+        }
+        // 浏览器标题：格式与模板里的 block title 保持一致（页面里由 {{ SITE_NAME_ALT }} 拼）
+        if (window.BZ_SITE_ALT) {
+            document.title = (song.artists ? song.artists + ' - ' : '') + (song.name || '') +
+                '免费在线听完整版 - ' + window.BZ_SITE_ALT;
+        }
+    }
+
+    function load(song) {
+        if (!audio || !song || !song.play_url) return;
+
+        // 换掉当前歌曲数据：saveProgress / reportPlayed / 歌词都读它
+        data = {
+            sid: song.sid || '',
+            name: song.name || '',
+            artists: song.artists || '',
+            cover: song.cover || '',
+            play_url: song.play_url || '',
+            lyrics: song.lyrics || ''
+        };
+        // 顺手把页面那个全局变量也对齐：它本来是页面初始化时的输入，但换歌后若不同步，
+        // 就成了"同一份数据两个地方存、其中一个永远是旧的" —— 以后谁读它谁踩坑。
+        window.BZ_SONG_DATA = data;
+
+        // 复位上一首残留的状态（进度、待恢复进度、歌词开关）
+        state.curTime = 0;
+        state.pendingSeek = null;
+        state.lrcStarted = false;
+        if (window.BZLrc) window.BZLrc.stop();
+
+        // 换源后必须 load()：单纯改 src 不会让一个已 ended 的 audio 重新加载
+        audio.src = data.play_url;
+        audio.load();
+        audio.playbackRate = state.rate;
+
+        renderSongInfo(song);
+        renderProgress();
+    }
+
     /* ---------- 播放控制 ---------- */
     // 应用待恢复进度：媒体元数据就绪后再 seek，避免设置无效
     function applyPendingSeek() {
@@ -157,7 +237,7 @@
         // 没有直链时（爬虫抓取失败，模板照常渲染播放按钮）直接给提示：
         // 否则 audio.play() 抛的是 NotSupportedError，下面的 catch 只认 NotAllowedError，
         // 用户点了按钮毫无反应、也没有任何解释。
-        if (!audio.src) { bzToast('播放链接暂不可用，请刷新页面重试'); return; }
+        if (!audio.src) { bzToast('播放链接暂不可用，请刷新页面重试', 'error'); return; }
         applyPendingSeek();
         var p = audio.play();
         if (p && typeof p.catch === 'function') {
@@ -168,7 +248,7 @@
                     state.playing = false;
                     write(KEY.playing, false);
                     renderAll();
-                    bzToast('浏览器拦截了自动播放，点击播放按钮继续');
+                    bzToast('浏览器拦截了自动播放，点击播放按钮继续', 'warning');
                 }
             });
         }
@@ -241,6 +321,7 @@
             write(KEY.playing, true);   // 标记"正在播放"，供刷新后自动续播判定
             renderAll();
             startLyrics();
+            reportStart();   // 「大家正在听」：这首歌此刻开始被听了
         });
         audio.addEventListener('pause', function () {
             state.playing = false;
@@ -265,9 +346,11 @@
                 window.BZLrc.stop();
                 state.lrcStarted = false;
             }
+            // 连播：交给 playlist.js 决定下一首（队列空了且没开循环时，它会就地停住）
+            if (typeof endedCb === 'function') endedCb();
         });
         audio.addEventListener('error', function () {
-            bzToast('播放链接失效，请刷新页面重试');
+            bzToast('播放链接失效，请刷新页面重试', 'error');
         });
 
         // 离开页面（刷新/关闭/切走）立即保存进度，保证续播位置精准
@@ -282,7 +365,7 @@
             audio.playbackRate = state.rate;
             write(KEY.rate, state.rate);
             renderRateBtn();
-            bzToast('播放速度 ' + (state.rate === 1 ? '1x' : state.rate + 'x'));
+            bzToast('播放速度 ' + (state.rate === 1 ? '1x' : state.rate + 'x'), 'info');
         });
         if (elMuteBtn) elMuteBtn.addEventListener('click', function (e) {
             e.preventDefault();
@@ -326,7 +409,7 @@
         renderAll();
     });
 
-    /* ---------- 对外接口（供 play.js 歌词点击跳转） ---------- */
+    /* ---------- 对外接口（play.js 歌词跳转 + playlist.js 连播） ---------- */
     window.BZSongPlayer = {
         seek: function (t) {
             if (!audio || !isFinite(t) || t < 0) return;
@@ -335,6 +418,14 @@
                 state.curTime = t;
                 renderProgress();
             } catch (e) { /* 忽略 */ }
-        }
+        },
+        // 换一首歌（音频、封面、歌名、歌词一起换），换完由调用方决定要不要立即播
+        load: function (song) { load(song); },
+        play: play,
+        pause: pause,
+        // 注册"整首播完"的回调，连播靠它触发下一首
+        onEnded: function (cb) { endedCb = cb; },
+        // 当前正在播的歌曲 id（playlist.js 用来对齐队列下标）
+        sid: function () { return data.sid || ''; }
     };
 })();

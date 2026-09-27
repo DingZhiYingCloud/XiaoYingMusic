@@ -52,20 +52,30 @@
             </div>
 
             <div class="min-w-0 flex-1">
-                <h1 class="text-xl font-bold sm:text-2xl" title="{{ song.name }}">{{ song.name }}</h1>
+                {# data-bz-name / data-bz-singer：连播换歌时由 song_player.js 就地改写 #}
+                <h1 class="text-xl font-bold sm:text-2xl" data-bz-name title="{{ song.name }}">{{ song.name }}</h1>
                 <p class="mt-1 text-sm opacity-70">
-                    <a class="link link-hover text-primary" href="{{ song.singer_url|default:'#' }}" title="{{ song.artists|join:'/' }}">{{ song.artists|join:'/' }}</a>
+                    <a class="link link-hover text-primary" data-bz-singer href="{{ song.singer_url|default:'#' }}" title="{{ song.artists|join:'/' }}">{{ song.artists|join:'/' }}</a>
                 </p>
             </div>
         </div>
         {% endif %}
 
         {% if play_url %}
-        {# 控制条：播放/暂停 · 时间 · 进度 · 音量 · 倍速 #}
+        {# 控制条：上一首 · 播放/暂停 · 下一首 · 时间 · 进度 · 音量 · 倍速 · 循环 · 喜欢 #}
         <div class="flex flex-wrap items-center gap-3 border-t border-base-300 bg-base-200/60 px-5 py-3.5">
+
+            {# 上一首/下一首/循环：队列由 playlist.js 管理（见页面下方的连播列表） #}
+            <button type="button" id="bz-btn-prev" class="btn btn-ghost btn-sm btn-circle" title="上一首">
+                <i class="fa fa-step-backward"></i>
+            </button>
 
             <button type="button" id="bz-btn-play" class="btn btn-primary btn-circle" title="播放">
                 <i class="fa fa-play"></i>
+            </button>
+
+            <button type="button" id="bz-btn-next" class="btn btn-ghost btn-sm btn-circle" title="下一首">
+                <i class="fa fa-step-forward"></i>
             </button>
 
             <span class="bz-pp-time flex shrink-0 items-center gap-1 text-xs tabular-nums opacity-70">
@@ -93,21 +103,99 @@
             <button type="button" id="bz-btn-rate"
                 class="btn btn-ghost btn-sm [&.on]:bg-primary [&.on]:text-primary-content"
                 title="倍速播放">1x</button>
+
+            {# 列表循环开关：状态存在浏览器里，下次进播放页仍然是上次的选择 #}
+            <button type="button" id="bz-btn-loop"
+                class="btn btn-ghost btn-sm btn-circle [&.on]:text-primary"
+                title="列表循环"><i class="fa fa-repeat"></i></button>
+
+            {# 喜欢：未登录时点了会跳登录页并记住回来（见 static/js/user.js） #}
+            <button type="button" class="btn btn-ghost btn-sm gap-1"
+                data-fav-sid="{{ sid }}" data-fav-title="{{ like_title }}"
+                aria-pressed="{% if liked %}true{% else %}false{% endif %}" title="喜欢这首歌">
+                <i class="fa {% if liked %}fa-heart text-error{% else %}fa-heart-o opacity-60{% endif %}"></i>
+                <span class="hidden sm:inline">喜欢</span>
+            </button>
         </div>
 
-        {# 歌词：通栏铺满、高度给足，桌面与移动都方便看 #}
+        {% comment %}
+        歌词 + 连播列表并排：歌词占主位，右侧是「我的喜欢」（没收藏时只剩空态/一句登录引导，
+        见 request.py 的 _play_queue）。两者只用间距分开、不加分隔线 —— 它们同属播放区，不是两张
+        独立卡片。窄屏放不下就上下堆叠，列表自然落到歌词下面。
+        ⚠️ 队列不一定在这块里：没有「我的喜欢」时，连播队列是下面那块「大家正在听」，
+        所以找列表条目一律用 [data-play-sid]，别假设它在这个右栏里（见 playlist.js 的文件头）。
+        ⚠️ 下面这些 id 是 song_player.js / play.js / playlist.js 的钩子，改名要同步改 JS。
+        {% endcomment %}
         <div class="border-t border-base-300 p-5">
-            <h2 class="mb-3 flex items-center gap-2 text-sm font-semibold opacity-70">
-                <i class="fa fa-align-left text-primary"></i>歌词
-            </h2>
-            <div id="play_geci"
-                class="h-72 overflow-y-auto scroll-smooth px-2 [&_li]:cursor-pointer [&_li]:py-1.5 [&_li]:text-sm [&_li]:leading-6 [&_li]:text-base-content/55 [&_li.hover]:font-semibold [&_li.hover]:text-primary">
-                <ul id="lrc_list" class="space-y-0.5 text-center"></ul>
-            </div>
-            {% comment %}无歌词占位：初始 hidden，缺歌词时由 song_player.js 移除 hidden 显示（有歌词时
-            play.js 会把歌词区与这里互相切换）。{% endcomment %}
-            <div id="lrc_nofound" class="hidden py-28 text-center text-sm opacity-50">
-                暂无歌词，静静欣赏旋律吧
+            <div class="grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px] lg:gap-6">
+
+                {# 左：歌词（高度给足，桌面与移动都方便看） #}
+                <div class="min-w-0">
+                    <h2 class="mb-3 flex items-center gap-2 text-sm font-semibold opacity-70">
+                        <i class="fa fa-align-left text-primary"></i>歌词
+                    </h2>
+                    <div id="play_geci"
+                        class="h-72 overflow-y-auto scroll-smooth px-2 [&_li]:cursor-pointer [&_li]:py-1.5 [&_li]:text-sm [&_li]:leading-6 [&_li]:text-base-content/55 [&_li.hover]:font-semibold [&_li.hover]:text-primary">
+                        <ul id="lrc_list" class="space-y-0.5 text-center"></ul>
+                    </div>
+                    {% comment %}无歌词占位：初始 hidden，缺歌词时由 song_player.js 移除 hidden 显示（有歌词时
+                    play.js 会把歌词区与这里互相切换）。{% endcomment %}
+                    <div id="lrc_nofound" class="hidden py-28 text-center text-sm opacity-50">
+                        暂无歌词，静静欣赏旋律吧
+                    </div>
+                </div>
+
+                {% comment %}
+                右：连播列表。只在「我的喜欢」有歌时显示它自己的条目（kind=likes）——
+                队列兜底成「大家正在听」时（kind=live），那些条目显示在下面的「大家正在听」块里，
+                这里保持空态/登录引导，免得同一批歌在页面上出现两次。
+                列表项用 <button data-play-sid> 而不是链接 —— 点击由 playlist.js 原地换歌（不跳页）。
+                data-bz-scroll 是 playlist.js 的钩子：它只滚这个容器，不滚整页。
+                {% endcomment %}
+                <div class="min-w-0" id="bz-playlist-box" data-kind="{{ playlist.kind }}">
+                    <h2 class="mb-3 flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm font-semibold opacity-70">
+                        <i class="fa fa-heart text-primary"></i>
+                        <span id="bz-playlist-title">{{ playlist.title }}</span>
+                        <a href="/my/likes.html" id="bz-playlist-manage"
+                            class="ml-auto text-xs font-normal link link-primary {% if playlist.kind != 'likes' %}hidden{% endif %}">管理</a>
+                    </h2>
+
+                    {% comment %}
+                    容器始终渲染（收藏后 JS 要往里写「我的喜欢」），但队列不是"我的喜欢"时
+                    里面一条都不渲染 —— 否则同一批歌会在 HTML 里出现两份（这里一份、下面那块一份）。
+                    {% endcomment %}
+                    <ol id="bz-playlist" data-bz-scroll
+                        class="{% if playlist.kind != 'likes' %}hidden {% endif %}max-h-72 space-y-0.5 overflow-y-auto">
+                        {% if playlist.kind == 'likes' %}
+                        {% for item in playlist.songs %}
+                        <li>
+                            <button type="button"
+                                class="flex w-full items-center gap-3 rounded-field px-2 py-2 text-left transition hover:bg-base-200"
+                                data-play-sid="{{ item.sid }}" title="{{ item.title }}">
+                                <span class="w-6 shrink-0 text-right text-xs tabular-nums opacity-45">{{ forloop.counter }}</span>
+                                <span class="truncate text-sm">{{ item.title }}</span>
+                            </button>
+                        </li>
+                        {% endfor %}
+                        {% endif %}
+                    </ol>
+
+                    {# 没有喜欢的歌时用这句占位，免得右栏塌成一片空白（未登录时由下面那句登录引导代替） #}
+                    <p id="bz-playlist-empty"
+                        class="{% if not CURRENT_USER or playlist.kind == 'likes' %}hidden {% endif %}py-6 text-center text-xs opacity-50">
+                        还没有喜欢的歌 —— 点心形就能收藏
+                    </p>
+
+                    {% if not CURRENT_USER %}
+                    <p class="mt-3 text-xs opacity-60" id="bz-playlist-login">
+                        <a href="/login.html?next={{ request.get_full_path|urlencode }}" class="link link-primary">登录</a>
+                        后可以收藏喜欢的歌，这里就会换成「我的喜欢」。
+                    </p>
+                    {% else %}
+                    <p id="bz-playlist-hint"
+                        class="{% if playlist.kind != 'likes' %}hidden {% endif %}mt-3 text-xs opacity-50">点歌名直接切换，一首放完自动接下一首。</p>
+                    {% endif %}
+                </div>
             </div>
         </div>
 
@@ -155,51 +243,51 @@
         {% endif %}
     </section>
 
-    {# ===== 歌曲说明 + 歌手卡片：两栏并排 ===== #}
-    <div class="mt-4 grid gap-4 lg:grid-cols-3">
-        {% if song.singer_url %}
-        <div class="rounded-box border border-base-300 bg-base-100 p-4">
-            <a class="flex items-center gap-3" href="{{ song.singer_url }}" title="{{ song.artists|join:'/' }}">
-                <img src="{{ song.cover }}" alt="{{ song.name }}"
-                    class="h-14 w-14 rounded-full object-cover ring-2 ring-base-300">
-                <div class="min-w-0">
-                    <div class="truncate font-semibold">{{ song.artists|join:'/' }}</div>
-                    <div class="mt-0.5 text-xs opacity-60">查看该歌手全部歌曲</div>
-                </div>
-                <span class="btn btn-xs btn-primary ml-auto">查看</span>
-            </a>
-        </div>
-        {% endif %}
-        <div class="rounded-box border border-base-300 bg-base-100 p-4 text-sm leading-relaxed opacity-75 {% if song.singer_url %}lg:col-span-2{% else %}lg:col-span-3{% endif %}">
-            <p><i class="fa fa-info-circle mr-1 text-primary"></i>温馨提示：歌曲来自搜索引擎，本站不做商业用途，不存储任何音频文件，版权属于各音乐门户！</p>
-        </div>
-    </div>
+    {% comment %}
+    「大家正在听」：一条**实时收听流水**——谁刚刚点了什么歌，一条横向带子自动滚过去。
+    它同时是"没有我的喜欢"时的连播队列（见 request.py 的 _play_queue 与 README 9.1）：
+    每条都是一张黑胶唱片（一张唱片的标记见 common_html/vinyl_item.html），点一张就地换歌、
+    一首放完自动接下一首。数据全部来自本地 PlayedSong 表，不产生任何回源。
 
-    {% if daily_recommend %}
-    <section class="mt-4 rounded-box border border-base-300 bg-base-100 p-5">
-        <header class="mb-4 flex items-baseline gap-3 border-b border-base-300 pb-3">
-            <h2 class="text-lg font-bold">每日好歌</h2>
-            <span class="text-xs opacity-60">换个心情继续听</span>
-        </header>
-        <ol class="gap-x-8 sm:columns-2 lg:columns-3">
-            {% for item in daily_recommend %}
-            <li class="break-inside-avoid">
-                <a class="flex items-center gap-3 rounded-field px-2 py-2 transition hover:bg-base-200"
-                    href="{{ item.link }}" title="{{ item.title }}">
-                    <span class="w-5 shrink-0 text-right text-xs tabular-nums opacity-45">{{ forloop.counter }}</span>
-                    <span class="truncate text-sm">{{ item.title }}</span>
-                </a>
-            </li>
-            {% endfor %}
-        </ol>
+    这块**总是渲染**（没人正在听时整块 hidden）：页面开久了由前端轮询刷新（见 playlist.js 的
+    refreshLive 与 /api/live），一开始是空的、后来有人开始听时这一块要能自己冒出来。
+    ⚠️ 下面的 id 是 playlist.js 的钩子，改名要同步改 JS。
+    {% endcomment %}
+    <section id="bz-live-box"
+        class="{% if not now_listening %}hidden {% endif %}mt-4 overflow-hidden rounded-box border border-base-300 bg-base-100 shadow-sm">
+        {# 头部：脉冲绿点 + 条数 + 玩法提示（别写死"30 分钟"，窗口由 PLAYED_SHOW_MINUTES 决定） #}
+        <div class="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-base-300 px-5 py-3.5">
+            <h2 class="flex items-center gap-2 text-sm font-semibold">
+                <span class="relative flex h-2 w-2">
+                    <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-60"></span>
+                    <span class="relative inline-flex h-2 w-2 rounded-full bg-success"></span>
+                </span>
+                大家正在听
+            </h2>
+            <span class="text-xs opacity-50">此刻 <span id="bz-live-count">{{ now_listening|length }}</span> 首 · 点一下就地播放</span>
+        </div>
+
+        {% comment %}
+        一条自动滚动的带子（.bz-marquee-* 与节日横幅是同一套类），鼠标放上去停住 ——
+        停住才方便好好看清某一张唱片。
+        份数与速度都交给 playlist.js 的 fitMarquee 按真实宽度去定：条目不够宽时要补副本，
+        否则滚到一半就露白；写死时长则一会儿快得看不清、一会儿慢得像爬。
+        {% endcomment %}
+        <div class="bz-marquee py-4">
+            <ul id="bz-live-list" class="bz-marquee-track">
+                {% include 'common_html/live_items.html' %}
+            </ul>
+        </div>
     </section>
-    {% endif %}
 </div>
 {% endblock %}
 
 {% block js %}
 <script src="/static/js/play.js?v=v9"></script>
-<script src="/static/js/song_player.js?v=v5"></script>
+<script src="/static/js/song_player.js?v=v8"></script>
+<script src="/static/js/playlist.js?v=v12"></script>
+{# 连播队列交给 playlist.js；json_script 会做安全转义，别手工拼 JSON #}
+{{ playlist.songs|json_script:"bz-playlist-data" }}
 <script>
 // 本页歌曲数据：供 song_player.js 播放（播放直链/歌词/封面）
 window.BZ_SONG_DATA = {
@@ -210,5 +298,12 @@ window.BZ_SONG_DATA = {
     play_url: '{{ play_url|escapejs }}',
     lyrics: '{{ lyrics|escapejs }}'
 };
+// 连播队列：有「我的喜欢」就是它，一首都没有（含未登录）就是「大家正在听」
+window.BZ_PLAYLIST = JSON.parse(document.getElementById('bz-playlist-data').textContent || '[]') || [];
+window.BZ_SITE_ALT = '{{ SITE_NAME_ALT|escapejs }}';
+// 是否已登录：右栏空态那句「还没有喜欢的歌」只给登录用户看（未登录时那句是登录引导）
+window.BZ_CURRENT_USER = {% if CURRENT_USER %}true{% else %}false{% endif %};
+// 「大家正在听」的自动刷新间隔（秒，0=不刷新）：值来自 .env 的 PLAYED_LIVE_REFRESH_INTERVAL
+window.BZ_LIVE_REFRESH = {{ PLAYED_LIVE_REFRESH_INTERVAL }};
 </script>
 {% endblock %}

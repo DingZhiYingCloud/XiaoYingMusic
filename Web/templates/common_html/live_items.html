@@ -1,0 +1,19 @@
+{% comment %}
+「大家正在听」的条目 —— 单独成片段是为了**两处共用**：
+  ① 播放页首次渲染（song.html 里 include）
+  ② 页面开久了前端轮询刷新时，接口直接把这段 HTML 返回给 JS 替换（见 Web/views/request.py 的 live_now）
+这样标记只有一份，模板与前端不会各写一遍、也就不会慢慢跑偏。
+需要的上下文：now_listening（PlayedSong 行列表）。
+
+输出**两条** li.bz-marquee-group：第一条是内容，第二条是接缝用的副本 ——
+跑马灯靠"整条位移一份的宽度"滚动（见 static-src/css/input.css 的 .bz-marquee 那套），
+没有第二份，带子滚到一半后面就会空掉。副本标 aria-hidden：它只是接缝，读屏念一遍就够。
+条目少、一份内容还撑不满容器时，由 static/js/playlist.js 的 fitMarquee 继续补副本。
+一张唱片长什么样见 common_html/vinyl_item.html。
+{% endcomment %}
+<li class="bz-marquee-group">
+    {% for item in now_listening %}{% include 'common_html/vinyl_item.html' %}{% endfor %}
+</li>
+<li class="bz-marquee-group" aria-hidden="true">
+    {% for item in now_listening %}{% include 'common_html/vinyl_item.html' %}{% endfor %}
+</li>

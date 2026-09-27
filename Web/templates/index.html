@@ -55,7 +55,7 @@
         连省略号都来不及出现。给网格项写死 min-width:0 后自动最小尺寸归零，truncate 才能正常收尾。
         {% endcomment %}
         <div class="grid gap-5 p-5 lg:grid-cols-12">
-            {# 子模块一：歌手墙（本地歌手库的前 24 位，密集头像网格，占主位） #}
+            {# 子模块一：歌手墙（每次从全量名册随机抽 24 位，整批缓存一段时间，见 singer_library.home_singers） #}
             <div class="min-w-0 lg:col-span-7 xl:col-span-8">
                 <h3 class="mb-3 flex items-center gap-2 text-sm font-semibold opacity-70">
                     <i class="fa fa-users text-primary"></i>歌手推荐

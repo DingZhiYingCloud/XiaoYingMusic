@@ -1,0 +1,137 @@
+{% extends 'template.html' %}
+
+{% block title %}注册 - {{ SITE_NAME }}{% endblock %}
+{% block robots %}noindex, follow{% endblock %}
+
+{% block content %}
+<section class="mx-auto w-full max-w-md px-4 py-10 sm:py-14">
+    <div class="card border border-base-300 bg-base-100">
+        <div class="card-body gap-5">
+            <h1 class="text-center text-xl font-bold">注册 {{ SITE_NAME }}</h1>
+
+            {% if error %}
+            <div class="alert alert-error text-sm">
+                <i class="fa fa-exclamation-circle opacity-70"></i>
+                <span>{{ error }}</span>
+            </div>
+            {% endif %}
+
+            {% if stage == 'verify' %}
+            {% comment %}
+            第二步：填验证码。
+            账号只在隐藏字段里来回传，页面上不显示（用户没必要再看一遍自己刚填的东西）。
+            重发按钮带 data-kind=register，走的是"重发注册验证码"接口。
+            {% endcomment %}
+            <div class="alert alert-success text-sm">
+                <i class="fa fa-envelope-o opacity-70"></i>
+                <span>{{ tip|default:'验证码已发送，请查收' }}</span>
+            </div>
+
+            <form method="post" action="/register.html" class="flex flex-col gap-4">
+                {% csrf_token %}
+                <input type="hidden" name="stage" value="verify">
+                <input type="hidden" name="channel" value="{{ channel }}">
+                {% if channel == 'phone' %}
+                <input type="hidden" name="phone" value="{{ ident }}">
+                {% else %}
+                <input type="hidden" name="email" value="{{ ident }}">
+                {% endif %}
+
+                <div class="flex gap-2">
+                    <label class="input w-full">
+                        <span class="opacity-60">验证码</span>
+                        <input name="code" class="grow" required inputmode="numeric"
+                            autocomplete="one-time-code" placeholder="收到的验证码" autofocus>
+                    </label>
+                    {# 账号已经在隐藏字段里，页面上没有对应输入框，所以用 data-value 直接给值 #}
+                    <button type="button" class="btn btn-outline shrink-0"
+                        data-value="{{ ident }}"
+                        data-field="{% if channel == 'phone' %}phone{% else %}email{% endif %}"
+                        data-kind="register" data-label="账号">重新发送</button>
+                </div>
+
+                <button class="btn btn-primary">完成注册</button>
+            </form>
+
+            {% else %}
+            {% comment %}
+            第一步：选渠道（邮箱/手机）+ 填账号与密码。提交后平台发验证码，再进入第二步。
+            两条通道的验证码分别是邮件与短信，所以让用户自己选，不猜。
+            {% endcomment %}
+            <div class="grid grid-cols-2 gap-1 rounded-field bg-base-200 p-1">
+                <button type="button" data-reg-channel="email" class="btn btn-sm">邮箱注册</button>
+                <button type="button" data-reg-channel="phone" class="btn btn-sm">手机注册</button>
+            </div>
+
+            <form method="post" action="/register.html" class="flex flex-col gap-4">
+                {% csrf_token %}
+                <input type="hidden" name="stage" value="send">
+                <input type="hidden" name="channel" id="bz-reg-channel" value="{{ channel|default:'email' }}">
+
+                <label class="input w-full" id="bz-reg-email-row">
+                    <span class="opacity-60">邮箱</span>
+                    <input type="email" name="email" class="grow" value="{{ email|default:'' }}"
+                        autocomplete="email" placeholder="用来接收验证码">
+                </label>
+
+                <label class="input hidden w-full" id="bz-reg-phone-row">
+                    <span class="opacity-60">手机号</span>
+                    <input type="tel" name="phone" class="grow" value="{{ phone|default:'' }}"
+                        autocomplete="tel" placeholder="用来接收短信验证码">
+                </label>
+
+                <label class="input w-full">
+                    <span class="opacity-60">密码</span>
+                    <input type="password" name="password" autocomplete="new-password"
+                        placeholder="8-64 位，需同时含字母和数字">
+                </label>
+
+                <label class="input w-full">
+                    <span class="opacity-60">昵称</span>
+                    <input name="username" class="grow" value="{{ username|default:'' }}"
+                        maxlength="32" placeholder="选填，展示用">
+                </label>
+
+                <button class="btn btn-primary">发送验证码</button>
+            </form>
+            {% endif %}
+
+            <p class="text-center text-sm opacity-70">
+                已有账号？<a href="/login.html" class="link link-primary">去登录</a>
+            </p>
+        </div>
+    </div>
+</section>
+{% endblock %}
+
+{% block js %}
+<script>
+    (function () {
+        // 第一步的渠道切换：邮箱 / 手机 两个输入框只显示一个，hidden 字段跟着变
+        var channelInput = document.getElementById('bz-reg-channel');
+        if (channelInput) {
+            var emailRow = document.getElementById('bz-reg-email-row');
+            var phoneRow = document.getElementById('bz-reg-phone-row');
+            var btns = document.querySelectorAll('[data-reg-channel]');
+
+            var setChannel = function (channel) {
+                channelInput.value = channel;
+                var isPhone = channel === 'phone';
+                emailRow.classList.toggle('hidden', isPhone);
+                phoneRow.classList.toggle('hidden', !isPhone);
+                Array.prototype.forEach.call(btns, function (b) {
+                    var on = b.getAttribute('data-reg-channel') === channel;
+                    b.classList.toggle('btn-primary', on);
+                    b.classList.toggle('btn-ghost', !on);
+                });
+            };
+            Array.prototype.forEach.call(btns, function (b) {
+                b.addEventListener('click', function () {
+                    setChannel(b.getAttribute('data-reg-channel'));
+                });
+            });
+            setChannel(channelInput.value);
+        }
+    })();
+</script>
+{% endblock %}

@@ -1,0 +1,46 @@
+{% comment %}
+一张黑胶唱片 + 歌名/歌手/多久前（文字在盘下居中）—— 「大家正在听」跑马灯里的条目。
+单独成片段，是因为跑马灯要输出**两份**内容（见 common_html/live_items.html），
+同一份标记不该写两遍。
+需要的上下文：item（PlayedSong 行）；forloop.first 表示这是最新那一次播放。
+⚠️ data-play-sid 是 playlist.js 的钩子（点它原地换歌，并给正在播的那张挂 .bz-playing）；
+   .bz-disc / .bz-sheen / .bz-disc-spin / .bz-deck 见 static-src/css/input.css。
+
+一张盘拆成三层，是因为它们"该不该跟着转"不同：
+  盘面 + 中心标签（封面）—— 唱片本体，转；
+  反光 —— 光源打在盘上的反光，光源不动所以它不动（跟着转的话整张盘像贴纸在晃，一眼就假）；
+  唱针 —— **最新那一次播放**（forloop.first）与**我正在听的那张**（.bz-playing）会搭上去。
+{% endcomment %}
+<button type="button" data-play-sid="{{ item.sid }}" title="{{ item.title }}"
+    class="bz-deck group mr-7 flex w-[84px] flex-col items-center text-center">
+    <span class="relative block h-[84px] w-[84px] shrink-0">
+        <span class="bz-disc absolute inset-[7%] rounded-full {% if forloop.first %}bz-disc-spin{% endif %}">
+            <span class="absolute inset-[31%] overflow-hidden rounded-full bg-base-300 ring-1 ring-black/40">
+                {% if item.cover %}
+                <img src="{{ item.cover }}" alt="" loading="lazy" class="h-full w-full object-cover">
+                {% else %}
+                <span class="flex h-full w-full items-center justify-center">
+                    <i class="fa fa-music text-zinc-400"></i>
+                </span>
+                {% endif %}
+            </span>
+            <span class="absolute left-1/2 top-1/2 h-[3px] w-[3px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-base-100/90"></span>
+        </span>
+        <span class="bz-sheen pointer-events-none absolute inset-[7%] rounded-full" aria-hidden="true"></span>
+        {% comment %}
+        唱针：转轴在盘右上方，臂斜着伸到盘面中部偏外 —— 坐标按 viewBox 100×100 画，随盘缩放。
+        **每张唱片都带一个**（标记只写一份），默认藏着，只有两种情形会搭上去（见 CSS 的 .bz-needle）：
+          · .bz-needle-on —— 最新那一次播放（forloop.first），服务端渲染时就定好了；
+          · .bz-playing   —— 我正在听的那张，点一张黑胶就地播放后由 markCurrent 挂上。
+        显隐全交给 CSS，所以点击换歌时 JS 不必去搬 DOM —— 跑马灯有好几份副本，搬起来很容易漏掉其中一份。
+        {% endcomment %}
+        <svg viewBox="0 0 100 100" class="bz-needle pointer-events-none absolute inset-0 h-full w-full{% if forloop.first %} bz-needle-on{% endif %}" fill="none" aria-hidden="true">
+            <line x1="95" y1="5" x2="74.7" y2="61.5" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" class="text-zinc-400"/>
+            <line x1="78" y1="52.5" x2="74.7" y2="61.5" stroke="currentColor" stroke-width="6.5" stroke-linecap="round" class="text-zinc-600"/>
+            <circle cx="95" cy="5" r="6.5" fill="currentColor" class="text-zinc-500"/>
+            <circle cx="95" cy="5" r="2.5" fill="currentColor" class="text-zinc-300"/>
+        </svg>
+    </span>
+    <span class="mt-2 block w-full truncate text-xs transition-colors group-hover:text-primary">{{ item.name }}</span>
+    <span class="block w-full truncate text-xs opacity-60 transition-opacity group-hover:opacity-90">{{ item.artists|default:'未知歌手' }} · {{ item.ago }}</span>
+</button>

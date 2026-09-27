@@ -1,0 +1,94 @@
+{% extends 'template.html' %}
+
+{% block title %}登录 - {{ SITE_NAME }}{% endblock %}
+{# 登录页对搜索引擎没有价值，表单页也不该被收录 #}
+{% block robots %}noindex, follow{% endblock %}
+
+{% block content %}
+<section class="mx-auto w-full max-w-md px-4 py-10 sm:py-14">
+    <div class="card border border-base-300 bg-base-100">
+        <div class="card-body gap-5">
+            <h1 class="text-center text-xl font-bold">登录 {{ SITE_NAME }}</h1>
+
+            {% if error %}
+            <div class="alert alert-error text-sm">
+                <i class="fa fa-exclamation-circle opacity-70"></i>
+                <span>{{ error }}</span>
+            </div>
+            {% endif %}
+
+            {# 两种登录方式只在前端切换：改隐藏字段 mode + 两行输入框的显隐，不劳烦服务端 #}
+            <div class="grid grid-cols-2 gap-1 rounded-field bg-base-200 p-1">
+                <button type="button" data-login-mode="password" class="btn btn-sm">密码登录</button>
+                <button type="button" data-login-mode="code" class="btn btn-sm">验证码登录</button>
+            </div>
+
+            <form method="post" action="/login.html" class="flex flex-col gap-4">
+                {% csrf_token %}
+                <input type="hidden" name="mode" id="bz-login-mode" value="{{ mode|default:'password' }}">
+                <input type="hidden" name="next" value="{{ next }}">
+
+                {# 一个输入框收邮箱/手机号/账号：三者对小影是三个字段，后端按形态判断（见 views/users.py） #}
+                <label class="input w-full">
+                    <span class="opacity-60">账号</span>
+                    <input name="ident" class="grow" value="{{ ident|default:'' }}" required
+                        autocomplete="username" placeholder="邮箱 / 手机号 / 账号">
+                </label>
+
+                <label class="input w-full" id="bz-login-password">
+                    <span class="opacity-60">密码</span>
+                    <input type="password" name="password" autocomplete="current-password"
+                        placeholder="登录密码">
+                </label>
+
+                <div class="hidden gap-2" id="bz-login-code">
+                    <label class="input w-full">
+                        <span class="opacity-60">验证码</span>
+                        <input name="code" inputmode="numeric" autocomplete="one-time-code"
+                            placeholder="收到的验证码">
+                    </label>
+                    <button type="button" class="btn btn-outline shrink-0"
+                        data-send-code="input[name=ident]" data-field="auto"
+                        data-kind="login" data-label="邮箱或手机号">发送验证码</button>
+                </div>
+
+                <button class="btn btn-primary">登录</button>
+            </form>
+
+            <p class="text-center text-sm opacity-70">
+                还没有账号？<a href="/register.html" class="link link-primary">注册一个</a>
+            </p>
+        </div>
+    </div>
+</section>
+{% endblock %}
+
+{% block js %}
+<script>
+    (function () {
+        var modeInput = document.getElementById('bz-login-mode');
+        var pwdRow = document.getElementById('bz-login-password');
+        var codeRow = document.getElementById('bz-login-code');
+        var btns = document.querySelectorAll('[data-login-mode]');
+
+        function setMode(mode) {
+            modeInput.value = mode;
+            var isCode = mode === 'code';
+            pwdRow.classList.toggle('hidden', isCode);
+            codeRow.classList.toggle('hidden', !isCode);
+            codeRow.classList.toggle('flex', isCode);
+            Array.prototype.forEach.call(btns, function (b) {
+                var on = b.getAttribute('data-login-mode') === mode;
+                b.classList.toggle('btn-primary', on);
+                b.classList.toggle('btn-ghost', !on);
+            });
+        }
+        Array.prototype.forEach.call(btns, function (b) {
+            b.addEventListener('click', function () {
+                setMode(b.getAttribute('data-login-mode'));
+            });
+        });
+        setMode(modeInput.value);
+    })();
+</script>
+{% endblock %}

@@ -23,6 +23,8 @@ PAGE_SIZE = 96
 HOME_COUNT = 24
 # 首页「随机点唱机」整批缓存的缓存键
 RANDOM_CACHE_KEY = 'bz_random_pick'
+# 首页歌手墙整批缓存的缓存键（与点唱机各记一份：两者换批互不影响）
+HOME_SINGERS_CACHE_KEY = 'bz_home_singers'
 # 列表页标题。源站原名叫「全部歌手列表」，本站统一叫「歌手大全」
 # （其它列表页的改名对照见 Web/views/request.py 的 RENAME_MAP）
 ALL_TITLE = '歌手大全'
@@ -38,10 +40,36 @@ def page_url(page):
 
 
 def home_singers():
-    """首页歌手墙：按入库顺序取前 24 位
+    """首页歌手墙：从全量名册里随机抽 HOME_COUNT 位
 
-    入库顺序就是源站「歌手大全」列表的默认顺序（半吨兄弟、汪苏泷、S.H.E、周深…），
-    库里没有"热门"这个维度，所以不另外排序 —— 固定不变，对页面缓存和 SEO 都更稳。
+    库里没有"热门"这个维度（入库顺序就是源站「歌手大全」的默认顺序），所以"推荐"本来就是个
+    伪命题 —— 固定取前 24 位只会让首页永远是同一批人。改成随机抽，两万多位都有机会露面。
+
+    整批缓存 RANDOM_PICK_TTL_HOURS 小时后再摇下一批，理由与 random_songs() 完全一致：
+    一是 `ORDER BY RANDOM()` 要扫全表，不该每个首页请求都跑一遍；二是只有这样才存在"一批"
+    这个概念 —— 换批由缓存过期后的第一个访客触发，不是整点。
+    这里刻意**复用**点唱机那个时长旋钮（它是 .env 的 CACHE_TTL_HOURS_HOME，缺省落到全局
+    CACHE_TTL_HOURS），不再新增配置项：首页上"多久换一批"本来就该是同一个手感。
+    """
+    cached = cache.get(HOME_SINGERS_CACHE_KEY)
+    if cached is not None:
+        return cached
+    rows = Singer.objects.order_by('?')[:HOME_COUNT]
+    # 存 dict 而不是 Singer 实例：缓存要把值 pickle，dict 更轻，也不会因为以后加字段而失配
+    singers = [{'name': s.name, 'link': s.link, 'pic': s.pic} for s in rows]
+    # 空库不写缓存：否则清过表/刚迁移完的站点，首页会一直空到缓存过期
+    if singers:
+        cache.set(HOME_SINGERS_CACHE_KEY, singers,
+                  int(settings.RANDOM_PICK_TTL_HOURS * 3600))
+    return singers
+
+
+def first_singers():
+    """名册最前面的 HOME_COUNT 位（按入库顺序，**固定不变**）
+
+    只给 sitemap 用。首页歌手墙改成随机抽之后，不能拿它去拼 sitemap —— 那批链接每换一次
+    缓存就变一遍，搜索引擎会反复看到"新增/消失"的 URL。sitemap 要的是一份稳定的清单，
+    所以这里按 id 取固定的前几位（顺带它们也是 model 实例，能读到 songs_synced_at）。
     """
     return list(Singer.objects.order_by('id')[:HOME_COUNT])
 

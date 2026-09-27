@@ -4,8 +4,28 @@
  *       只靠模板扫描 Tailwind 不会生成对应样式。
  */
 
+/* ============ 站点级轻提示 ============
+ * 四个等级，用**颜色 + 图标**双重区分（只靠颜色的话，色觉障碍的人分不出来）：
+ *   info    通知（默认）—— 中性告知，蓝
+ *   success 成功        —— 做成了，绿
+ *   warning 警告        —— 做法有问题、或条件还没满足，黄
+ *   error   错误        —— 失败了、出故障了，红
+ * 调用：bzToast('已加入我的喜欢', 'success')。
+ * 不传类型就是 info，所以老的调用点不会因为少一个参数而挂掉。
+ * 停留时长也分级：越严重留越久，出错时用户多半需要看清它到底说了什么。
+ * ⚠️ alert-* 这些类名是运行时才挂上的，本文件是 Tailwind 的扫描源之一（见 input.css 的
+ *   @source 与文件头），改这里的类名要连着重编译 CSS，否则样式不会生成。
+ */
+var BZ_TOAST = {
+    info:    { cls: 'alert-info',    icon: 'fa-info-circle',         ms: 2400 },
+    success: { cls: 'alert-success', icon: 'fa-check-circle',         ms: 2400 },
+    warning: { cls: 'alert-warning', icon: 'fa-exclamation-triangle', ms: 3000 },
+    error:   { cls: 'alert-error',   icon: 'fa-exclamation-circle',   ms: 3600 }
+};
+
 // 轻量提示：替代原 layui layer.msg（避免为一个提示引入整套 layui 样式与脚本）
-function bzToast(msg) {
+function bzToast(msg, type) {
+    var conf = BZ_TOAST[type] || BZ_TOAST.info;
     var box = document.getElementById('bz-toast');
     if (!box) {
         box = document.createElement('div');
@@ -14,16 +34,22 @@ function bzToast(msg) {
         document.body.appendChild(box);
     }
     var item = document.createElement('div');
-    item.className = 'alert alert-info shadow-lg text-sm';
-    item.textContent = msg;
+    item.className = 'alert bz-toast-in shadow-lg text-sm ' + conf.cls;
+    // 图标与文字各自建节点：msg 可能来自接口、可能含用户输入，绝不拼进 HTML
+    var icon = document.createElement('i');
+    icon.className = 'fa ' + conf.icon;
+    var text = document.createElement('span');
+    text.textContent = msg;
+    item.appendChild(icon);
+    item.appendChild(text);
     box.appendChild(item);
-    setTimeout(function () { item.remove(); }, 2400);
+    setTimeout(function () { item.remove(); }, conf.ms);
 }
 
 // 站内搜索：统一跳转 /so/<关键词>.html（关键词需 URL 编码）
 function bzSearch(form) {
     var kw = (form.wd.value || '').replace(/^\s+|\s+$/g, '');
-    if (!kw) { bzToast('请输入要搜索的内容'); return false; }
+    if (!kw) { bzToast('请输入要搜索的内容', 'warning'); return false; }
     window.location.href = '/so/' + encodeURIComponent(kw) + '.html';
     return false;
 }

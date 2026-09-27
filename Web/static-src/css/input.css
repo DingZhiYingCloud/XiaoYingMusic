@@ -21,10 +21,13 @@
 /* 唯一的类名来源：Django 模板目录（相对本文件路径） */
 @source "../../templates";
 
-/* common.js / theme.js 里会运行时挂上 menu-active / dock-active 等 daisyUI 状态类，
- * 并动态创建 toast/alert 与主题面板节点，这些类名不在模板里，需一并扫描才生成样式。 */
+/* common.js / theme.js / user.js 里会运行时挂上 menu-active / dock-active 等 daisyUI
+ * 状态类，并动态创建 toast/alert 与主题面板节点，这些类名不在模板里，需一并扫描才生成样式。
+ * user.js 还会在点喜欢后给图标换 text-error / opacity-60（类名模板里也出现过，这里再扫一遍
+ * 是为了以后脚本里新增类名时不会漏）。 */
 @source "../../static/js/common.js";
 @source "../../static/js/theme.js";
+@source "../../static/js/user.js";
 
 /* 主题：启用 daisyUI 全部内置主题，供页头「主题」下拉自由切换（做法与小影 API 一致）。
  * 默认档不再是固定值，而由日期决定（节日主题 / 季节兜底，见 settings.py 的
@@ -108,6 +111,163 @@
    文案仍完整可见（静止展示），不影响功能。 */
 @media (prefers-reduced-motion: reduce) {
   .bz-marquee-track { animation: none; }
+}
+
+/* 鼠标进到「大家正在听」这块的**任何地方**（标题栏、边距、唱片上）就停住跑马灯。
+   原先暂停只挂在带子（ul）上：鼠标停在标题栏或者卡片边缘是停不下来的，
+   想看清某一张还得对准那一条才停。 */
+#bz-live-box:hover .bz-marquee-track {
+  animation-play-state: paused;
+}
+
+/* ============ 轻提示（bzToast）的入场 ============
+ * 四个等级靠颜色 + 图标区分（见 static/js/common.js 的 BZ_TOAST），这里只管"蹦出来"这一下：
+ * 从右侧滑入 + 淡入 —— daisyUI 的 toast 本身没有任何出现动效，是硬生生冒出来的，很生硬。 */
+@keyframes bz-toast-in {
+  from { opacity: 0; transform: translateX(12px) scale(0.98); }
+  to   { opacity: 1; transform: none; }
+}
+.bz-toast-in {
+  animation: bz-toast-in 0.22s ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .bz-toast-in { animation: none; }
+}
+
+/* ============ 播放页连播列表里"正在播放"的那一行 ============
+ * 这个类由 static/js/playlist.js 在切歌时挂上 / 摘掉，右栏「我的喜欢」与「大家正在听」都用它。
+ * 用一个类名而不是在 JS 里拼一串 Tailwind 类：换歌时要同步的样式有好几项，
+ * 集中写在 CSS 里比在脚本里维护 className 字符串清楚，也不会漏掉某一项。
+ * ⚠️ 黑胶唱片上要盖掉这里的浅灰底（那方块垫在黑胶下面很突兀），见下面 .bz-deck.bz-playing。 */
+.bz-playing {
+  color: var(--color-primary);
+  background-color: var(--color-base-200);
+  font-weight: 600;
+}
+
+/* ============ 「大家正在听」的黑胶唱片 ============
+ * 一张盘拆成三层，是因为它们"该不该跟着转"不同：
+     盘面 + 中心标签（封面）—— 唱片本体，转；
+     反光 —— 光源打在盘上的反光，光源不动所以它不动。
+   反光必须单独一层、不能塞进旋转层里：跟着转的话整张盘会像一块贴纸在晃，一眼就假。 */
+.bz-disc {
+  background:
+    /* 同心圆纹路：0.6px 亮 / 2.4px 暗，是黑胶那种看不真切、但一直在的层次 */
+    repeating-radial-gradient(circle at 50% 50%,
+      rgba(255, 255, 255, 0.05) 0 0.6px,
+      rgba(0, 0, 0, 0) 0.6px 2.4px),
+    radial-gradient(circle at 50% 50%, #262626 0%, #161616 55%, #090909 100%);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07), 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+@keyframes bz-disc-spin {
+  to { transform: rotate(360deg); }
+}
+/* 4.4 秒一圈：真黑胶 33⅓ 转是 1.8 秒一圈，在页面上这么转太急、看得眼晕 */
+.bz-disc-spin {
+  animation: bz-disc-spin 4.4s linear infinite;
+}
+
+/* 盘面外侧的两道反光（conic-gradient 扇形），默认位置在右上与左下 */
+.bz-sheen {
+  background: conic-gradient(from 200deg,
+    rgba(255, 255, 255, 0) 0deg,
+    rgba(255, 255, 255, 0.16) 22deg,
+    rgba(255, 255, 255, 0) 46deg,
+    rgba(255, 255, 255, 0) 158deg,
+    rgba(255, 255, 255, 0.11) 182deg,
+    rgba(255, 255, 255, 0) 206deg);
+}
+
+/* 唱针默认藏着 —— 每张唱片都带一个（标记只写一份），只有这两种情形会搭上去：
+     .bz-needle-on  最新那一次播放（服务端按 forloop.first 直接加的）
+     .bz-playing    我正在听的那张（点一张黑胶就地播放后，playlist.js 的 markCurrent 挂上）
+   显隐完全交给 CSS，所以点击换歌时 JS 不必去搬 DOM —— 跑马灯有好几份副本，搬起来容易漏。
+   "抬起"是绕转轴旋转（transform-origin 落在 SVG 右上的转轴处），落下来正好是真实的落针动作。 */
+.bz-needle {
+  opacity: 0;
+  transform: rotate(-14deg);
+  transform-origin: 95% 5%;
+  transition: opacity 0.3s ease, transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.bz-needle-on,
+.bz-deck.bz-playing .bz-needle {
+  opacity: 1;
+  transform: none;
+}
+/* 正在播放的那张盘也转起来：搭着针却不转很怪（真实唱机搭了针就是在放）。
+   悬停那条规则的特异性比这条高（多一个 :hover），所以悬停正在播的盘会提速到 2.4 秒。 */
+.bz-deck.bz-playing .bz-disc {
+  animation: bz-disc-spin 4.4s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bz-disc-spin,
+  .bz-deck.bz-playing .bz-disc { animation: none; }
+}
+
+/* ---------- 黑胶的两种"被指到"的样子 ----------
+ * 一、鼠标移上去（或键盘聚焦）：整张抬起来、放大一点、盘开始转、反光让开 —— 像把唱片从架子上拿起来。
+ * 二、正在播放的那张：盘外套一圈主色光环，缓慢呼吸，一眼看出"现在响的是这张"。
+ * 都用 .bz-deck 限定（这个类只加在黑胶条目上），右栏「我的喜欢」那个列表不受影响。 */
+.bz-deck {
+  transition: transform 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+/* 盘自己的阴影（抬起来那一层）也要过渡，否则 hover 时是"啪"地出现一圈影子 */
+.bz-deck .bz-disc {
+  transition: box-shadow 0.3s ease;
+}
+.bz-deck:hover,
+.bz-deck:focus-visible {
+  transform: translateY(-4px) scale(1.05);
+}
+/* 移上去这张盘就转起来（比常驻那张快一点，像被"启动"）。
+   :not(.bz-disc-spin) 是躲开本来就在转的那张 —— 给它重挂动画等于从头转，看着像卡了一下。 */
+.bz-deck:hover .bz-disc:not(.bz-disc-spin) {
+  animation: bz-disc-spin 2.4s linear infinite;
+}
+/* 反光让开一点：像光被抬起来的盘扫了一下 */
+.bz-deck .bz-sheen {
+  transition: transform 0.35s ease-out;
+}
+.bz-deck:hover .bz-sheen {
+  transform: rotate(26deg);
+}
+/* 抬起来得有影子，否则只是"变大"而不是"拿起来" */
+.bz-deck:hover .bz-disc {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.09),
+    0 0 0 1px rgba(255, 255, 255, 0.3),
+    0 10px 20px -4px rgba(0, 0, 0, 0.5);
+}
+
+/* 正在播放的那张：通用的 .bz-playing 给的是"浅灰方块 + 主色字"，那方块垫在黑胶下面很突兀，
+   这里只留它给的字色，光环改画到盘外面（用 ::after 画，不额外加元素）。
+   缓慢呼吸是故意的：它和"在转的那张"常常不是同一张，没有转速能提示，就靠这圈光在说"是我"。 */
+.bz-deck.bz-playing {
+  background-color: transparent;
+}
+.bz-deck.bz-playing .bz-disc::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 9999px;
+  border: 2px solid var(--color-primary);
+  box-shadow: 0 0 16px 2px color-mix(in oklab, var(--color-primary) 55%, transparent);
+  pointer-events: none;
+  animation: bz-halo 2.6s ease-in-out infinite;
+}
+@keyframes bz-halo {
+  0%, 100% { opacity: 0.45; transform: scale(0.98); }
+  50%      { opacity: 1;    transform: scale(1.04); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bz-deck,
+  .bz-deck:hover { transform: none; }
+  .bz-deck:hover .bz-disc:not(.bz-disc-spin) { animation: none; }
+  .bz-deck:hover .bz-sheen { transform: none; }
+  .bz-deck.bz-playing .bz-disc::after { animation: none; opacity: 1; }
 }
 
 /* 需要自定义主题时取消注释（daisyui-theme.mjs 为此保留）：

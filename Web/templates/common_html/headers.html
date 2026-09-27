@@ -32,6 +32,29 @@
 
         <div class="navbar-end gap-1">
             {% include 'common_html/search_box.html' with wide=1 %}
+            {% comment %}
+            登录入口：未登录显示"登录"；已登录显示昵称 + 下拉（我的喜欢 / 退出）。
+            CURRENT_USER 由 Web/services/user_session.py 的 context processor 注入。
+            ⚠️ 这里用 comment 标签而不是 {# #}：Django 的 {# #} 只支持单行，跨行写会把
+            注释原文渲染到页面上（本项目踩过这个坑，见 search_box.html 顶部说明）。
+            {% endcomment %}
+            {% if CURRENT_USER %}
+            <details class="dropdown dropdown-end">
+                <summary class="btn btn-ghost btn-sm gap-1" title="{{ CURRENT_USER.display_name }}">
+                    <i class="fa fa-user-circle-o"></i>
+                    <span class="hidden max-w-24 truncate sm:inline">{{ CURRENT_USER.display_name }}</span>
+                </summary>
+                <ul class="menu dropdown-content z-50 mt-3 w-36 rounded-box border border-base-300 bg-base-100 p-2 text-sm shadow-md">
+                    <li><a href="/my/likes.html"><i class="fa fa-heart-o mr-2"></i>我的喜欢</a></li>
+                    <li><a href="/logout"><i class="fa fa-sign-out mr-2"></i>退出登录</a></li>
+                </ul>
+            </details>
+            {% else %}
+            <a href="/login.html" class="btn btn-ghost btn-sm gap-1" title="登录">
+                <i class="fa fa-user-o"></i>
+                <span class="hidden sm:inline">登录</span>
+            </a>
+            {% endif %}
             {# 主题切换：面板内容由 theme.js 注入到 [data-theme-menu] #}
             <details class="dropdown dropdown-end">
                 <summary class="btn btn-ghost btn-sm gap-1" title="切换主题">
