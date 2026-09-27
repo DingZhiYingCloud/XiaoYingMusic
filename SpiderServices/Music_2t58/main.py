@@ -97,7 +97,8 @@ class _SourceIPAdapter(HTTPAdapter):
     只能在连接层用 urllib3 的 source_address 强制指定。
 
     为什么由 .env 控制而不是写死：国内开发机不需要这层绑定，不配
-    MUSIC_2T58_SOURCE_IP 时行为与从前完全一致；换服务器也只需改 .env。
+    MUSIC_2T58_SOURCE_IPS 时行为与从前完全一致（不绑源地址，交给内核挑）；换服务器
+    也只需改 .env。配了多个则由 _alive_source_ips 挑可用的那个，被封的进冷却。
     """
 
     def __init__(self, source_address, **kwargs):
@@ -153,12 +154,13 @@ class _RateLimiter:
 class Music2t58Spider:
     """2t58.com 首页数据爬虫
 
-    目标站点有人机验证，需在 .env 配置有效的 MUSIC_2T58_PHPSESSID
-    （浏览器通过验证后从 cookie 获取，过期需更新）。
+    目标站点有人机验证，爬虫会自动过（见 _pass_verification）；验证状态失效时会换个
+    会话重过一次（见 _renew_session），所以 .env 的 MUSIC_2T58_PHPSESSID 只是可选的
+    首次便利项，不需要人工维护、过期也不用管。
 
     若部署机的主 IP 被源站拦截（症状：ping 通、其它端口通，只有 80/443 不通），
-    在 .env 配 MUSIC_2T58_SOURCE_IP 指定另一个可用 IP 作为出站源地址即可。国内
-    开发机不需要配置。
+    把本机的公网 IP 都填进 .env 的 MUSIC_2T58_SOURCE_IPS，被封的会被自动跳过、
+    换下一个可用出口（见 SOURCE_IPS）。国内开发机不需要配置（留空即不绑定）。
     """
 
     # ============ 源站域名与故障切换 ============
@@ -184,6 +186,20 @@ class Music2t58Spider:
 
     # 各域名的冷却到期时间 {域名: 时间戳}，多进程共享（见 _alive_bases）
     DOMAIN_BAD_CACHE_KEY = '2t58_bad_domains'
+
+    # ============ 出站源 IP（可配多个，按可用性自动切换）============
+    # 源站按**来源 IP** 拦截（见 _SourceIPAdapter），而且实测封禁会在本机的多个公网 IP
+    # 之间**轮流**发生（2026-09-25 / 09-26 / 09-27 各撞到一次）：写死任何一个，等封禁轮到
+    # 它头上整站就空白。所以这里是**列表** —— 被封的进冷却、自动换下一个，与上面域名那套
+    # 切换完全同一套逻辑（_alive_bases）。
+    #
+    # 列表写在 .env 的 MUSIC_2T58_SOURCE_IPS（逗号分隔，写法容错同 DOMAINS）。
+    # **留空 = 不绑定源地址**，交给内核挑默认出口 —— 只有一个公网 IP 的机器就该留空，
+    # 行为与从前完全一致。
+    SOURCE_IPS = _env_list('MUSIC_2T58_SOURCE_IPS', '')
+    # 各出口 IP 的冷却到期时间。与域名那份**分开记**：出口被封是整机级故障（一挂全挂），
+    # 域名被限流只影响那一条，混在一起会互相误伤。
+    SOURCE_IP_BAD_CACHE_KEY = '2t58_bad_source_ips'
 
     # ============ 兜底源（最后一层）============
     # 第一层（上面那组域名）**全部**拿不到时，才走这里。默认是 aat.cx（「爱听音乐网」）
@@ -341,11 +357,11 @@ class Music2t58Spider:
                 session.cookies.set('PHPSESSID', value, domain=domain)
             else:
                 session.cookies.set('PHPSESSID', value)
-        # 指定出站源 IP（见 _SourceIPAdapter 说明）：不配就交给内核自己挑，
-        # 与从前完全一致 —— 本地开发不需要这一层。
-        source_ip = os.getenv('MUSIC_2T58_SOURCE_IP', '').strip()
-        if source_ip:
-            adapter = _SourceIPAdapter((source_ip, 0))
+        # 绑出站源 IP：先绑当前可用的第一个（见 SOURCE_IPS）。真正抓取时 _get_html 还会
+        # 逐个换绑，这里只是让不经过 _get_html 的调用也有个合理默认。
+        ip = cls._alive_source_ips()[0]
+        if ip:
+            adapter = _SourceIPAdapter((ip, 0))
             session.mount('http://', adapter)
             session.mount('https://', adapter)
         return session
@@ -514,7 +530,8 @@ class Music2t58Spider:
         return not self._has_content(data)
 
     # ============ 抓取源故障切换（第一层域名 → 第二层兜底源）============
-    def _alive_bases(self, bases, cache_key):
+    @classmethod
+    def _alive_bases(cls, bases, cache_key):
         """从一组基址里挑出**不在冷却期内**的，保持原本顺序；全在冷却里就返回空列表
 
         状态放 Django cache 而不是类属性：uWSGI 起了多个进程，各记一份的话会出现
@@ -524,6 +541,9 @@ class Music2t58Spider:
         "全试完就重来"，但源站整体不可达时会让**每个请求**都把每条域名重新撞一遍 ——
         10 秒超时 × N 条，比不做切换还慢一倍，冷却也就白做了。返回空列表则是快速失败，
         页面立刻渲染（数据为空），等冷却到期后自动从第一条重新开始试。
+
+        域名与出口 IP 共用这一套（见 SOURCE_IPS），所以做成 classmethod：
+        _build_session 建会话时也要用它挑一个可用的出口。
         """
         bad = cache.get(cache_key) or {}
         now = time.time()
@@ -536,6 +556,40 @@ class Music2t58Spider:
         cache.set(cache_key, bad, self.DOMAIN_COOLDOWN * 4)
         logger.warning('%s %s 抓取失败，冷却 %s 秒后重试：%s',
                        label, base, self.DOMAIN_COOLDOWN, reason)
+
+    # ============ 出口 IP 的选择与换绑（见 SOURCE_IPS）============
+    @classmethod
+    def _alive_source_ips(cls):
+        """挑出不在冷却期内的出口 IP，供 _get_html 逐个试
+
+        返回 [''] 表示「不绑定源地址、交给内核挑」，两种情况都这样：
+          · 没配 SOURCE_IPS —— 单公网 IP 的机器就该走默认出口；
+          · 配的 IP 全在冷却里 —— 都刚试失败了，但总得留一次机会。
+
+        按 IP **整体**冷却，而不是"IP × 域名"的组合：出口被封是整机级故障、一挂全挂，
+        所以某个 IP 在一个域名上撞了失败，就没必要再拿到别的域名上试。代价是某个 IP 只对
+        个别域名不通时也会被整体跳过 —— 但那是少数情况，且 300 秒冷却到期后会重新探测。
+        """
+        if not cls.SOURCE_IPS:
+            return ['']
+        return cls._alive_bases(cls.SOURCE_IPS, cls.SOURCE_IP_BAD_CACHE_KEY) or ['']
+
+    @classmethod
+    def _bind_source_ip(cls, session, ip):
+        """把会话的出站连接改绑到指定源 IP（ip 为空 = 不绑定，交给内核挑）
+
+        只换 adapter、**不重建会话**：重建会把会话里的人机验证状态（cookie）一起丢掉。
+        mount 会替换该前缀下的连接池，所以换 IP 时既有的空闲连接作废 —— 换 IP 本来就是
+        异常路径（某个出口被封了），这点代价可以接受。
+        """
+        with cls._SESSION_LOCK:
+            if ip:
+                adapter = _SourceIPAdapter((ip, 0))
+                session.mount('http://', adapter)
+                session.mount('https://', adapter)
+            else:
+                session.mount('http://', HTTPAdapter())
+                session.mount('https://', HTTPAdapter())
 
     @classmethod
     def _limiter(cls):
@@ -582,13 +636,19 @@ class Music2t58Spider:
         first_error = None
         for base in self._alive_bases(self.DOMAINS, self.DOMAIN_BAD_CACHE_KEY):
             url = f'{base}{path}'
-            self._check_budget(deadline)
-            try:
-                return self._fetch_html(url)
-            except _SourceThrottled:
-                raise                       # 不是源站的错，不冷却，直接快速失败
-            except Exception as e:
-                first_error = e
+            # 同一个域名换几个出口 IP 各试一次：出口被封是**整机级**故障（一挂全挂），
+            # 比单条域名被限流更常见，所以先换 IP，再谈切域名、走代理。
+            for ip in self._alive_source_ips():
+                self._check_budget(deadline)
+                self._bind_source_ip(self.session, ip)
+                try:
+                    return self._fetch_html(url)
+                except _SourceThrottled:
+                    raise                   # 不是源站的错，不冷却，直接快速失败
+                except Exception as e:
+                    first_error = e
+                    if ip:
+                        self._mark_base_bad(ip, self.SOURCE_IP_BAD_CACHE_KEY, '出口 IP', e)
             html = self._retry_via_proxy(
                 lambda proxies: self._fetch_html(url, proxies=proxies),
                 f'源站页面 {url}', deadline)
@@ -615,14 +675,19 @@ class Music2t58Spider:
         last_error = None
         for base in self._alive_bases(self.FALLBACK_BASES, self.FALLBACK_BAD_CACHE_KEY):
             url = f'{base}{path}'
-            self._check_budget(deadline)
-            try:
-                return self._rewrite_fallback_html(
-                    self._fetch_html(url, session=self.fallback_session))
-            except _SourceThrottled:
-                raise
-            except Exception as e:
-                last_error = e
+            # 出口 IP 与第一层共用同一份冷却：被封的是**这台机器**，兜底源照样连不上
+            for ip in self._alive_source_ips():
+                self._check_budget(deadline)
+                self._bind_source_ip(self.fallback_session, ip)
+                try:
+                    return self._rewrite_fallback_html(
+                        self._fetch_html(url, session=self.fallback_session))
+                except _SourceThrottled:
+                    raise
+                except Exception as e:
+                    last_error = e
+                    if ip:
+                        self._mark_base_bad(ip, self.SOURCE_IP_BAD_CACHE_KEY, '出口 IP', e)
             html = self._retry_via_proxy(
                 lambda proxies: self._fetch_html(url, session=self.fallback_session,
                                                  proxies=proxies),
