@@ -25,6 +25,10 @@ CACHE_TTL_HOURS = float(os.getenv('CACHE_TTL_HOURS', '2'))
 # 播放直链短缓存时长(分钟):CDN 直链有时效,单独短缓存避免过期播放失败,
 # 由 .env 的 CACHE_TTL_PLAY_MINUTES 控制,默认 30 分钟。
 CACHE_TTL_PLAY_MINUTES = float(os.getenv('CACHE_TTL_PLAY_MINUTES', '30'))
+# 「上一次成功的那份」另存副本的时长(小时),抓不到时用它回落,详见 _cached。
+# 取 24 小时:榜单/搜索这类数据一天内变化不大,给旧的总比给空的强 ——
+# 空页面不只是难看,搜索引擎看到的就是"这个站没内容"。
+CACHE_TTL_STALE_HOURS = float(os.getenv('CACHE_TTL_STALE_HOURS', '24'))
 
 
 class _CacheAdapter:
@@ -370,6 +374,8 @@ class Music2t58Spider:
             adapter = _SourceIPAdapter((ip, 0))
             session.mount('http://', adapter)
             session.mount('https://', adapter)
+        # 记下当前绑的是哪个出口，免得 _get_html 每次抓取都重复 mount（见 _bind_source_ip）
+        session.bz_bound_ip = ip
         return session
 
     @classmethod
@@ -498,18 +504,45 @@ class Music2t58Spider:
         return f'2t58_{joined}'
 
     def _cached(self, key, fetch_func, timeout):
-        """带缓存的抓取:命中缓存直接返回,未命中执行抓取后写入缓存
+        """带缓存的抓取：命中缓存直接返回，未命中执行抓取后写入缓存
 
-        空结果(验证未通过/解析不到内容)不写缓存,避免失败结果被缓存住,
-        导致源站恢复后页面仍长时间无数据。
+        抓到结果为空（验证未通过 / 解析不到内容）时不写缓存，避免把失败结果缓存住、
+        源站恢复后页面仍长时间无数据（见 _is_empty）。
+
+        没抓到时（抛异常，或抓到的是空）**回落到上一次成功的那份** —— 它另存了一份长期
+        副本（`key + _STALE_SUFFIX`）。宁可在源站抖动、几条源一起进冷却的那段窗口里给稍旧的
+        数据，也不要让页面空着：榜单页会显示"暂无榜单数据"、搜索会显示"没找到"，而后者
+        是**错的**（歌明明在库里）。回落时打一条 warning，日志里能看出这次给的是旧数据。
         """
         data = cache.get(key)
         if data is not None:
             return data
-        data = fetch_func()
-        if not self._is_empty(data):
+
+        error = None
+        try:
+            data = fetch_func()
+        except Exception as e:
+            # 这里连 _SourceThrottled（回源超预算 / 被限流）一起接住：它同样意味着"这次没数据"，
+            # 一样该拿旧数据顶上，而不是把空页面丢给访客（它不冷却源站的语义不受影响）
+            data = None
+            error = e
+
+        if data is not None and not self._is_empty(data):
             cache.set(key, data, timeout)
+            cache.set(key + self._STALE_SUFFIX, data, int(CACHE_TTL_STALE_HOURS * 3600))
+            return data
+
+        stale = cache.get(key + self._STALE_SUFFIX)
+        if stale is not None:
+            logger.warning('%s 本次没抓到（%s），回落到上次成功的那份数据',
+                           key, '抓取结果为空' if error is None else str(error)[:90])
+            return stale
+        if error is not None:
+            raise error
         return data
+
+    # 「上一次成功的那份」另存副本的键后缀：抓不到时用它回落（见 _cached）
+    _STALE_SUFFIX = '_stale'
 
     # 判断"是否有内容"时忽略的回显参数(直接来自 URL 参数,不是抓取到的内容)
     CACHE_IGNORE_KEYS = {'sid'}
@@ -605,6 +638,11 @@ class Music2t58Spider:
         mount 会替换该前缀下的连接池，所以换 IP 时既有的空闲连接作废 —— 换 IP 本来就是
         异常路径（某个出口被封了），这点代价可以接受。
         """
+        # 已经绑在这个出口上就什么都不做：重复 mount 会把该前缀的连接池整个丢掉，
+        # 下一个请求又要重做 TCP+TLS 握手 —— 既慢，又让源站看到更多新建连接
+        # （那正是它风控的抓手之一）。_get_html 每个域名都会调到这里，所以这层判断很值。
+        if getattr(session, 'bz_bound_ip', None) == ip:
+            return
         with cls._SESSION_LOCK:
             if ip:
                 adapter = _SourceIPAdapter((ip, 0))
@@ -613,6 +651,7 @@ class Music2t58Spider:
             else:
                 session.mount('http://', HTTPAdapter())
                 session.mount('https://', HTTPAdapter())
+            session.bz_bound_ip = ip
 
     @classmethod
     def _limiter(cls):
