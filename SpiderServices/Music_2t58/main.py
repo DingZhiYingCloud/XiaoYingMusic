@@ -288,21 +288,59 @@ class Music2t58Spider:
     _FALLBACK_SESSION = None
     _SESSION_LOCK = threading.Lock()
 
+    # ============ 人机验证自愈：验证 cookie 的持久化 ============
+    # 验证通过后源站下发的 PHPSESSID 存这里，两层各一份（见 _save_cookies / _stored_cookies）。
+    # 存 cache 而不是 .env，理由见 _save_cookies。失效或丢失都无害：下次撞上验证页会自动重过。
+    COOKIE_KEYS = {'live': '2t58_live_phpsessid', 'fallback': '2t58_fallback_phpsessid'}
+    # 持久化多久（秒）。源站验证状态约 1 小时失效，这里留长只是省事，与正确性无关。
+    COOKIE_TTL = 86400 * 30
+
     @classmethod
-    def _build_session(cls, with_phpsessid):
+    def _stored_cookies(cls, kind):
+        """取这一层持久化下来的 {域名: PHPSESSID}；没有就回落到 .env（首次部署时人工填的）
+
+        按域名分开存：源站的验证状态是**按域名记**的（www 与 music 各一套），只留一个值
+        的话，在 A 域验好之后拿去 B 域用会被重新弹验证。.env 那个人工填的值不带域名
+        （requests 会把它发给所有站点），所以记成 {'': 值}。
+        """
+        stored = cache.get(cls.COOKIE_KEYS[kind])
+        if isinstance(stored, dict) and stored:
+            return stored
+        env_value = os.getenv('MUSIC_2T58_PHPSESSID', '') if kind == 'live' else ''
+        return {'': env_value} if env_value else {}
+
+    @classmethod
+    def _save_cookies(cls, kind, session):
+        """把会话里源站下发的 PHPSESSID 按域名持久化，供本进程与其它 worker 复用
+
+        存 cache 而不是写回 .env：① uWSGI 起了 4 个 worker，是各自独立的进程，
+        写 .env 相互看不见；② .env 是进程启动时读的，改完必须重载 uWSGI 才生效 ——
+        那正是"必须人工更新 PHPSESSID 并重启"的根因；③ .env 在服务器上未必可写。
+        """
+        jar = {c.domain: c.value for c in session.cookies if c.name == 'PHPSESSID'}
+        if jar:
+            cache.set(cls.COOKIE_KEYS[kind], jar, cls.COOKIE_TTL)
+
+    @classmethod
+    def _build_session(cls, kind, cookies=None):
         """建一个抓取用 Session：统一请求头 + 出站源 IP 绑定（+ 人机验证 PHPSESSID）
 
-        PHPSESSID 只注入第一层：它是**按域存放**的，而 `cookies.set` 不带 domain 时
+        cookies 不传 = 按 kind 取已持久化的那份（缓存优先、.env 兜底）；
+        传 {} = **全新空白会话**，不带任何 PHPSESSID（源站会重新下发，见 _renew_session）。
+
+        PHPSESSID 只给对应那一层：它是**按域存放**的，而 `cookies.set` 不带 domain 时
         requests 会把它发给**所有**站点 —— 兜底源收到一个不属于自己的 PHPSESSID 后
         会重新弹人机验证，验证状态来回失效。所以两层各用各的会话。
         """
         session = requests.Session()
         session.headers.update(cls.HEADERS)
-        # 注入人机验证通过后的 PHPSESSID
-        if with_phpsessid:
-            phpsessid = os.getenv('MUSIC_2T58_PHPSESSID', '')
-            if phpsessid:
-                session.cookies.set('PHPSESSID', phpsessid)
+        # 记下这个会话属于哪一层：会话重建时要用它找到对的持久化键（见 _renew_session）
+        session.bz_kind = kind
+        for domain, value in (cls._stored_cookies(kind) if cookies is None else cookies).items():
+            if domain:
+                session.cookies.set('PHPSESSID', value, domain=domain)
+            else:
+                session.cookies.set('PHPSESSID', value)
         # 指定出站源 IP（见 _SourceIPAdapter 说明）：不配就交给内核自己挑，
         # 与从前完全一致 —— 本地开发不需要这一层。
         source_ip = os.getenv('MUSIC_2T58_SOURCE_IP', '').strip()
@@ -322,21 +360,46 @@ class Music2t58Spider:
         """
         with cls._SESSION_LOCK:
             if cls._SHARED_SESSION is None:
-                cls._SHARED_SESSION = cls._build_session(with_phpsessid=True)
+                cls._SHARED_SESSION = cls._build_session('live')
             return cls._SHARED_SESSION
 
     @classmethod
     def _fallback_session(cls):
-        """兜底源共用的 Session：与第一层分开，且不带 2t58 的 PHPSESSID
+        """兜底源共用的 Session：与第一层分开、各带各的 PHPSESSID
 
         兜底源的人机验证由 _pass_verification 自动过（GET 取 csrf_token → POST 表单），
-        实测新会话就能过，不需要提前准备 PHPSESSID；验证状态存在它自己的 PHPSESSID 里，
-        与第一层互不干扰。
+        实测新会话就能过，所以首次并不需要预先准备 PHPSESSID；验证状态存在它自己的
+        PHPSESSID 里，与第一层互不干扰。
         """
         with cls._SESSION_LOCK:
             if cls._FALLBACK_SESSION is None:
-                cls._FALLBACK_SESSION = cls._build_session(with_phpsessid=False)
+                cls._FALLBACK_SESSION = cls._build_session('fallback')
             return cls._FALLBACK_SESSION
+
+    def _renew_session(self, current):
+        """当前会话的验证状态已作废，换一个新的（自愈，调用处见 _fetch_html）
+
+        两条路，看"有没有别人刚验好"：
+          · 持久化那份里存在与当前会话**不同**的值 → 说明刚有 worker 验成功并存下了新的，
+            直接拿它建会话，不必再验一次（4 个 worker 同时失效时能省掉大部分重复验证）；
+          · 没有（或存的就是当前这个作废值）→ 建一个**全新空白会话**：源站会在验证页上
+            给新会话下发新的 PHPSESSID，接着由 _pass_verification 在新 cookie 上重新过一遍。
+        """
+        kind = getattr(current, 'bz_kind', 'live')
+        current_id = current.cookies.get('PHPSESSID')
+        fresh = {d: v for d, v in self._stored_cookies(kind).items() if v != current_id}
+        session = self._build_session(kind, fresh)
+        with self._SESSION_LOCK:
+            if kind == 'live':
+                type(self)._SHARED_SESSION = session
+                self.session = session
+            else:
+                type(self)._FALLBACK_SESSION = session
+                self.fallback_session = session
+        logger.info('%s 的验证状态已作废，会话已重建（%s）',
+                    '第一层' if kind == 'live' else '兜底源',
+                    '复用其它进程刚验好的 cookie' if fresh else '改用全新会话重新过验证')
+        return session
 
     def __init__(self):
         self.session = self._shared_session()
@@ -635,7 +698,7 @@ class Music2t58Spider:
             logger.warning('%s 经代理 %s 未取到数据', what, node)
         return None
 
-    def _fetch_html(self, url, session=None, proxies=None):
+    def _fetch_html(self, url, session=None, proxies=None, _renewed=False):
         """抓单个 URL 的页面 HTML，自动处理人机验证（不做切换）
 
         目标站点验证机制：首次访问返回含 csrf_token 的验证页，
@@ -643,6 +706,9 @@ class Music2t58Spider:
         验证状态在 session 中保留约 1 小时。**每条域名各有一套验证状态**（Cookie 按
         域名分域存放），所以切域名之后会自动在新域名上重新过一次验证。
         兜底源是另一个域、另一套 Cookie，所以走它自己的 session（见 _fallback_session）。
+
+        验证状态作废时（PHPSESSID 过期或被源站作废）自动换个会话重过一次，不必人工更新
+        .env、也不必重启（见 _renew_session）。_renewed 是"已经重过一次"的标记，防无限重试。
 
         proxies 是备用线路传进来的：过验证的 POST 必须跟着走同一个代理，
         否则验证请求会从另一个出口 IP 发出去，源站看到 IP 变了会重新弹验证。
@@ -656,13 +722,20 @@ class Music2t58Spider:
         # 命中人机验证页时，提交表单通过验证后重新请求原页面
         if 'csrf_token' in html and '安全人机验证' in html:
             html = self._pass_verification(url, html, session=session, proxies=proxies)
-        # 过完验证仍是验证页 → PHPSESSID 失效或源站改了验证流程，这次抓取是失败的。
-        # 必须报错，不能把验证页当正常页面返回：验证页里没有结果列表，曲库会把
-        # 「空结果」当成「这个关键词查不到」打上负缓存（默认 12 小时内不再回源），
-        # 于是一次验证失效就变成"所有搜索都搜不到"。
-        # 对故障切换来说这也正是想要的信号：验证过不去 = 这条域名当前不可用。
+        # 过完验证仍是验证页 → 这个会话的验证状态已经作废，先自愈，再判这次抓取是否失败
         if '安全人机验证' in html:
-            raise RuntimeError(f'人机验证未通过（PHPSESSID 可能已过期）：{url}')
+            if _renewed:
+                # 换了新会话还是过不去：源站改了验证流程，或这台机器被风控了。
+                # 必须报错，不能把验证页当正常页面返回：验证页里没有结果列表，曲库会把
+                # 「空结果」当成「这个关键词查不到」打上负缓存（默认 12 小时内不再回源），
+                # 于是一次验证失效就变成"所有搜索都搜不到"。
+                # 对故障切换来说这也正是想要的信号：验证过不去 = 这条域名当前不可用。
+                raise RuntimeError(f'人机验证未通过（PHPSESSID 可能已过期）：{url}')
+            session = self._renew_session(session)
+            html = self._fetch_html(url, session=session, proxies=proxies, _renewed=True)
+            # 重新验证成功才落地：存的是源站给新会话下发的 PHPSESSID，
+            # 本进程重启后、以及其它 worker 都能直接复用
+            self._save_cookies(getattr(session, 'bz_kind', 'live'), session)
         return html
 
     def _pass_verification(self, url, html, session=None, proxies=None):

@@ -71,8 +71,9 @@ Django（6.1）
   一次写会把整个库的读锁住，很容易冒 `database is locked` 并误发换库告警）。
   出现持续的写锁冲突时，`Web/services/db_alert.py`
   会发邮件提醒换库（邮件里带换库步骤与现场信息）。
-- **人机验证**：源站（2t58.com）有"安全人机验证"，需在 `.env` 配置有效的
-  `MUSIC_2T58_PHPSESSID`（浏览器手动通过验证后从 Cookie 复制，过期需更新）。
+- **人机验证**：源站（2t58.com）有"安全人机验证"，爬虫会自动过（见 7.1）。
+  `.env` 的 `MUSIC_2T58_PHPSESSID` 是**可选**的首次便利项：填了能省掉第一次回源的一次验证，
+  不填也能跑；验证失效后会自动换新会话重过，不需要人工更新、也不需要重启。
 - **播放链接解密**：源站播放链接是 AES-ECB 加密的，爬虫内置解密逻辑，前端不参与。
 
 ## 三、目录结构
@@ -135,7 +136,7 @@ python -m venv .venv
 # 2. 安装依赖（版本已锁死；需要 Python 3.12+）
 .venv\Scripts\pip install -r requirements.txt
 
-# 3. 配置 .env（参考第五节；没有 .env 时程序用默认值运行，但爬虫需要 PHPSESSID）
+# 3. 配置 .env（参考第五节；没有 .env 时程序用默认值运行，爬虫也能自己过验证）
 #    为了省掉几小时的爬取，把仓库里的种子库拷成正式库：
 #      copy deploy\seed_db.sqlite3 db.sqlite3
 
@@ -147,7 +148,7 @@ python -m venv .venv
 
 - **不拷种子库也能跑起来**：先跑一次 `python manage.py migrate` 建表即可，
   只是本地库是空的 —— 首页的歌手墙与随机点唱机会是空态、歌手大全是 0 位，
-  搜索/榜单/歌手详情这些要回源站的页面也得先配好 `.env` 的 `MUSIC_2T58_PHPSESSID`（见 7.1）。
+  搜索/榜单/歌手详情这些要回源站的页面首次会稍慢（爬虫要过一次人机验证，见 7.1）。
   所以想"开箱就是完整数据"，就把种子库拷过去。
 - **部署到服务器**（宝塔 + Nginx + uWSGI）：见第十三章，那里有一份能照抄的完整流程。
 
@@ -175,8 +176,9 @@ SITE_CONTACT_WECHAT=duyanbz
 SITE_CONTACT_TG=xiaoying1216
 ANALYTICS_ID=3QisJxfuIZ0dJgUf    # 51.la 统计 ID，留空则不输出统计脚本
 
-# ---- 2t58 爬虫：人机验证通过后的 PHPSESSID（浏览器获取，过期需更新）----
-MUSIC_2T58_PHPSESSID=你的PHPSESSID
+# ---- 2t58 爬虫：人机验证的初始 PHPSESSID（可选，留空也能跑，见 7.1）----
+# 填了能省掉第一次回源的一次验证；过期不需要人工更新，会自动重过
+MUSIC_2T58_PHPSESSID=
 # ---- 2t58 爬虫：源站域名列表（可选，见 7.6）----
 # 不填就用代码默认值（www.2t58.com 与 music.2t58.com）
 # MUSIC_2T58_DOMAINS=https://www.2t58.com/,https://music.2t58.com/
@@ -236,7 +238,7 @@ DB_ALERT_COOLDOWN_HOURS=24
 | `SITE_CONTACT_WECHAT` | 微信号（页脚「联系我们」弹窗） | `duyanbz` |
 | `SITE_CONTACT_TG` | Telegram（页脚「联系我们」弹窗） | `xiaoying1216` |
 | `ANALYTICS_ID` | 51.la 统计 ID，**留空则不输出统计脚本** | 作者的 ID |
-| `MUSIC_2T58_PHPSESSID` | 源站人机验证凭证，**必填**，过期需更新 | 空 |
+| `MUSIC_2T58_PHPSESSID` | 源站人机验证的初始凭证（**可选**，失效会自动重过，见 7.1） | 空 |
 | `MUSIC_2T58_DOMAINS` | 源站域名列表（逗号分隔），用于自动故障切换（见 7.6） | 代码内置的 `www` + `music` |
 | `MUSIC_2T58_DOMAIN_COOLDOWN` | 某条域名硬失败后的冷却秒数（见 7.6） | `600` |
 | `MUSIC_2T58_FALLBACK_BASES` | 兜底源列表（逗号分隔），前面域名全挂时才走（见 7.8） | `https://www.aat.cx/` |
@@ -310,14 +312,24 @@ DB_ALERT_COOLDOWN_HOURS=24
 
 源站（2t58.com）有"安全人机验证"：首次访问返回含 `csrf_token` 的验证页，
 需 POST 表单（勾选"我不是人机"）通过验证后才返回真实内容，验证状态约保留 1 小时。
-爬虫已内置 `_pass_verification` 自动过验证，但前提是 `.env` 里的
-`MUSIC_2T58_PHPSESSID` 有效。
+爬虫已内置 `_pass_verification` 自动过验证。
 
-**如何更新 PHPSESSID**（当出现"验证失效/数据为空"时）：
+**验证失效会自动恢复，不需要人工更新 cookie、也不需要重启**（`_fetch_html` 的自愈分支）：
 
-1. 用浏览器打开 `https://www.2t58.com/`，手动完成人机验证；
-2. 按 F12 → Application → Cookies，复制 `PHPSESSID` 的值；
-3. 粘贴到 `.env` 的 `MUSIC_2T58_PHPSESSID`，重启服务。
+1. 撞上验证页且过不去 → 判定这个会话的验证状态已作废，换一个会话重来；
+2. 换谁：持久化里若有**其它进程刚验好**的 cookie 就直接复用（4 个 worker 同时失效时能省掉
+   大部分重复验证）；没有就起一个全新空白会话，由源站下发新的 `PHPSESSID`（见 `_renew_session`）；
+3. 新会话上再走一遍 `_pass_verification`，成功后把新 cookie **按域名**存进缓存
+   （`_save_cookies`）—— 本进程重启后、以及另外的 worker 都能直接复用；
+4. 只重试一次：换了会话仍过不去就照旧报「人机验证未通过」，让故障切换把这条源冷却 ——
+   那说明源站改了验证流程或这台机器被风控，人工填 cookie 也救不了。
+
+`.env` 的 `MUSIC_2T58_PHPSESSID` 因此只是**可选的首次便利项**：填了能省掉第一次回源的
+「GET 验证页 → POST 过验证」，不填也能跑（见 `_stored_cookies`）。它不再需要人工维护，
+也就不会再有"cookie 过期 → 全站数据变空 → 必须手动改 .env 并重启"那条老路。
+
+> 一条源站域名一套验证状态（Cookie 按域名分域存放），所以切域名后会在新域名上重新过一次；
+> 兜底源是另一套程序、另一个域，走它自己的会话与持久化键，互不干扰。
 
 ### 7.2 播放链接解密
 
@@ -1047,8 +1059,8 @@ python manage.py sync_singer_songs --refresh       # 已同步过的也重新来
 - `--limit N` 是「**只在前 N 位的名单范围里干活**」，不是「最多干 N 个」：先按列表顺序
   圈定范围，再筛掉已同步的。所以重跑既不会重复爬，也不会越过范围。
 - **请求节奏**：默认每位之间停 2.5 秒（≈ 0.4 次/秒）。实测单次抓取 0.43~0.48 秒，
-  480 位约 7 分钟，23,435 位约 19 小时。慢是**不被限流的前提** —— 一旦被限流，
-  PHPSESSID 失效会让全站数据变空，这个代价远大于多跑半天。
+  480 位约 7 分钟，23,435 位约 19 小时。慢是**不被限流的前提** —— 一旦被限流（IP 被风控、
+  验证过不去），整站回源都会受影响，这个代价远大于多跑半天。
 - **中断了直接再跑同一条命令**就续上（靠 `songs_synced_at` 判断谁还没做过）。
 - 写库是「先删这位歌手这一页的旧行、再插新行」并包在一个事务里：源站删过歌时重跑
   不会留下旧行；也不会出现"删除成功但插入失败"导致歌手页变空。
@@ -1342,7 +1354,7 @@ CACHE_TTL_PLAY_MINUTES=60     # 直链单独刷新，所以播放始终是新的
 
 | 问题 | 解决办法 |
 |---|---|
-| 页面数据为空（榜单/歌曲/歌手第 2 页起等） | ① 检查 `MUSIC_2T58_DOMAINS`（或代码里的默认值）中的域名是否都写成带 `www` 的完整地址（见 7.4，最常见原因）；② 检查 `.env` 的 `MUSIC_2T58_PHPSESSID` 是否过期，更新后重启；③ 部署机 IP 被源站拦截（见 7.5，特征是每个需要回源的页面都卡满 10 秒）→ 配 `MUSIC_2T58_SOURCE_IP`；④ 两条域名都被限流（见 7.6，日志里会有"源站域名 xxx 抓取失败"）→ 等冷却到期，或补新域名到 `MUSIC_2T58_DOMAINS`；⑤ 源站可能暂时不可达，稍后重试（空数据不会进缓存，源站恢复即自动恢复）；⑥ 如果日志里同时出现"源站域名"和"兜底源"两类抓取失败，说明连兜底源 aat.cx 也不通了（见 7.8）。**注意首页不受影响**：它三块数据都读本地库，源站挂了也有内容（见 8.11） |
+| 页面数据为空（榜单/歌曲/歌手第 2 页起等） | ① 检查 `MUSIC_2T58_DOMAINS`（或代码里的默认值）中的域名是否都写成带 `www` 的完整地址（见 7.4，最常见原因）；② 日志里报「人机验证未通过」= 源站改了验证流程（验证失效本来会自动重过，见 7.1）；③ 部署机 IP 被源站拦截（见 7.5，特征是每个需要回源的页面都卡满 10 秒）→ 配 `MUSIC_2T58_SOURCE_IP`；④ 两条域名都被限流（见 7.6，日志里会有"源站域名 xxx 抓取失败"）→ 等冷却到期，或补新域名到 `MUSIC_2T58_DOMAINS`；⑤ 源站可能暂时不可达，稍后重试（空数据不会进缓存，源站恢复即自动恢复）；⑥ 如果日志里同时出现"源站域名"和"兜底源"两类抓取失败，说明连兜底源 aat.cx 也不通了（见 7.8）。**注意首页不受影响**：它三块数据都读本地库，源站挂了也有内容（见 8.11） |
 | 修改代码后页面没变化 | ① 服务是否用 `--noreload` 启动（是则需手动重启）；② 浏览器强刷（Ctrl+F5）绕过本地缓存 |
 | 改了**模板**但页面没变化 | `DEBUG=False` 时 Django 默认启用缓存模板加载器，改模板**必须重启服务**（只有 Python 代码会自动 reload） |
 | 页面某处冒出一段 `{# ... #}` 文字 | 模板里写了跨行 `{# #}`。Django 的 `{# #}` 只支持单行，跨行必须用 `{% comment %}...{% endcomment %}` |
@@ -1506,7 +1518,7 @@ python manage.py check --deploy
 | `SECRET_KEY`（W009） | `.env` 填一串 50 位以上随机值 | `.env.example` 里是占位符。密钥泄露 = 会话/签名可被伪造 |
 | `DEBUG`（W018） | `.env` 设 `DEBUG=False` | 生产环境开着会把源码路径、配置直接显示给访客 |
 | `ALLOWED_HOSTS` | `.env` 填真实域名，多个用逗号分隔 | 不填等于允许任意 Host 头 |
-| `MUSIC_2T58_PHPSESSID` | `.env` 填有效值（见 7.1） | 不配则除首页外的页面都抓不到数据（首页三块全读本地库，见 8.11） |
+| `MUSIC_2T58_PHPSESSID` | 可选，见 7.1 | 不配也能跑（首次回源多过一次验证）；失效后会自愈，不需要人工更新或重启 |
 | 建表 | `python manage.py migrate` | 曲库三张表（`Song` / `SearchKeyword` / `SearchResult`）、歌手名册表（`Singer`）、歌手曲目表（`SingerSong`）、播放次数表（`SongPlay`）、播放过的歌表（`PlayedSong`，见 9.1）以及用户表（`UcUser`）与收藏表（`Favorite`）都靠迁移创建，不跑就没有搜索功能、歌手大全是空的、首页「今日热听榜」和「随机点唱机」也是空的、播放页取数会报错、登录与收藏也会直接报错 |
 | 静态文件 | **看线上 nginx 指向哪**：指向 `Web/static/` 就不用做；指向 `staticfiles/`（宝塔默认）则每次改完 CSS/JS 都要同步过去 | 静态源目录是 `Web/static`（`DEBUG=False` 时由 `XiaoYingMusic/urls.py` 手动挂路由）。但线上那台 nginx 的 `/static/` 实际指向 `staticfiles/`，**改完不 cp 过去就不生效且不报错** —— 两种配法的差别与自检命令见 13.8 末节 |
 | CSRF 中间件（W003） | **已启用**（`settings.py` 的 `CsrfViewMiddleware`，2026-09 接入用户登录时打开） | 新增表单要带 `{% csrf_token %}`；模板里的异步 POST（心形、发码）统一从 `<meta name="csrf-token">` 取 token，见 `static/js/user.js` 与第十六章。**注意**：`/api/play/ended` 与 `/api/play/start` 靠 `csrf_exempt` 豁免，那里不能删（见 8.9、9.1） |
@@ -1622,7 +1634,7 @@ vi .env
 | `SECRET_KEY` | 换成新生成的随机串（`.env.example` 里是占位符）。生成命令：`python -c "from django.core.management.utils import get_random_secret_key as g; print(g())"` |
 | `DEBUG` | `False` |
 | `ALLOWED_HOSTS` | 你的域名（多个用逗号分隔），别留 `*` |
-| `MUSIC_2T58_PHPSESSID` | 源站人机验证通过后的 Cookie（获取方法见 7.1）。**不配就只有首页和本地库页面有数据** |
+| `MUSIC_2T58_PHPSESSID` | 源站人机验证的初始凭证（可选，见 7.1）。不配也能跑，只是首次回源要多过一次验证 |
 | `SITE_NAME` / `SITE_NAME_ALT` | 站点名（见 12.1） |
 | `SITE_CONTACT_*` | 页脚「联系我们」里的微信 / 邮箱 / TG |
 | `USE_X_FORWARDED_PROTO` | 站点走 HTTPS 时设 `True`，否则 canonical / sitemap 里全是 `http://`（见 13.9） |
@@ -1813,7 +1825,7 @@ find /www/wwwroot/BeiZiMusic -type f -exec chmod 644 {} \;
 | 检查项 | 怎么查 | 期望 |
 |---|---|---|
 | 首页 | 打开 `/` | 有歌手墙 + 今日热听榜 + 随机点唱机。注意首页**不经过源站**，它正常不代表爬虫正常 |
-| 爬虫通不通 | 打开 `/list/top.html`，或随便点一首歌 | 有数据（首次等 0.5~2 秒）→ 说明 PHPSESSID 有效、服务器 IP 没被源站风控 |
+| 爬虫通不通 | 打开 `/list/top.html`，或随便点一首歌 | 有数据（首次等 0.5~2 秒；若比平时久是重过了一次验证）→ 说明源站可达、验证通过、服务器 IP 没被风控 |
 | 本地库 | 打开 `/singerlist/index/index/index/index.html` | 一页 96 位歌手、头像正常 |
 | 搜索 | 搜一个词 | 有结果；第一次慢、之后快（结果已落本地库） |
 | 静态文件 | F12 看 CSS/JS 请求 | 全 200（有 404 就是样式丢失的原因） |
@@ -1866,7 +1878,7 @@ find /www/backup/music -name 'db-*.sqlite3' -mtime +7 -delete
 | 502 Bad Gateway | uWSGI 没起来 / socket 不通 | 看 `logto` 指向的日志；`ps aux \| grep uwsgi`；确认 ini 里的 socket 与 Nginx 的 `uwsgi_pass` 一致 |
 | 样式全丢、CSS 404 | 静态文件没走通 | 确认 `DEBUG=False`（Django 会自己服务 `/static/`）；走 Nginx 时检查 `alias` 两端斜杠与路径 |
 | 改了模板不生效 | `DEBUG=False` 时 Django 用缓存模板加载器 | 重启 uWSGI（FAQ 也有这条） |
-| 除首页外都是空 | ① `MUSIC_2T58_PHPSESSID` 失效；② 部署机 IP 被源站拦截（特征是每个页面都卡满 10 秒） | ① 重新获取（见 7.1）；② 配 `MUSIC_2T58_SOURCE_IP` 换出站 IP（见 7.5）；③ 两条域名都被限流就等冷却，或往 `MUSIC_2T58_DOMAINS` 补新域名（见 7.6） |
+| 除首页外都是空 | ① 部署机 IP 被源站拦截（特征是每个页面都卡满 10 秒）；② 源站整体不可达 / 改了验证流程 | ① 配 `MUSIC_2T58_SOURCE_IP` 换出站 IP（见 7.5）；② 看日志分辨：连接超时是源站不通，报「人机验证未通过」是验证流程变了（见 7.1）；③ 两条域名都被限流就等冷却，或往 `MUSIC_2T58_DOMAINS` 补新域名（见 7.6） |
 | 歌曲页不会播放、`BZ_SONG_DATA` 里除了 sid 全是空 | 同上 —— 拿不到播放直链，前端连 mp3 请求都发不出去 | 同上，先看 uWSGI 日志里该请求是不是正好 ~10 秒 |
 | 500，日志里 `could not convert string to float` | `.env` 里 `CACHE_TTL_HOURS` 写成了空值 | 填 `2`（已知坑，见 14.2） |
 | 搜索/播放计数没反应 | `db.sqlite3` 或 `cache/` 不可写 | 按 13.10 重新授权，注意**目录**也要可写 |
@@ -2059,7 +2071,7 @@ curl -s https://你的域名/sitemap.xml | python -c "import sys,xml.etree.Eleme
 1. **Google Search Console** 提交 `/sitemap.xml`，再用"网址检查"抽查首页与任意一个歌手页；
 2. **Bing Webmaster Tools** 同样提交 sitemap（必应支持直接从 GSC 导入）；
 3. 过几天回头看两个后台的"sitemap 已发现 / 已编入"差值 —— 差得多说明有页面被 noindex
-   或抓取失败（源站风控、PHPSESSID 过期都会这样，见 13.14）。
+   或抓取失败（源站风控、源站不可达都会这样，见 13.14）。
 
 > 上线到 HTTPS 后一定要按 13.9 打开 `USE_X_FORWARDED_PROTO`，
 > 否则 canonical / og:url / sitemap 里全会是 `http://` 地址。
