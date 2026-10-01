@@ -1190,14 +1190,18 @@ class Music2t58Spider:
             'lyrics': lyrics,
         }
 
-    def fetch_play_url(self, sid):
+    def fetch_play_url(self, sid, budget=None):
         """只向 play.php 要一次播放直链：不抓歌曲页、不取歌词（无缓存，总是最新）
 
         用途：PlayedSong 里缓存的直链过期时用它刷新 —— 比 fetch_song 少一次页面请求、
         少一次歌词请求，这正是"少打扰源站"的关键。封面/歌词/歌名沿用库里已有的。
         拿不到时返回空串（_fetch_play_info 内部已兜住异常），调用方保留旧值即可。
+
+        budget 覆盖本次的时间预算（秒，默认 REQUEST_BUDGET）。调用方在**访客请求线程里**
+        等这个结果时（见 played_songs._refresh_url_now）必须传个小值，
+        否则源站不可达会把 worker 占满 25 秒 → 502。
         """
-        return self._fetch_play_info(sid)['play_url']
+        return self._fetch_play_info(sid, budget=budget)['play_url']
 
     def _do_fetch_search(self, keyword, page):
         """抓取搜索结果页：结果列表 / 分页 / 是否被屏蔽（不带缓存）
@@ -1478,7 +1482,7 @@ class Music2t58Spider:
         return {'name': song_name, 'artists': artists, 'cover': cover,
                 'singer_url': singer_url}
 
-    def _fetch_play_info(self, song_id):
+    def _fetch_play_info(self, song_id, budget=None):
         """请求 play.php 获取播放信息：播放直链 / 封面图 / 歌词cid（带故障切换）
 
         跟抓页面一样：先按第一层域名顺序试，**全都不行才走兜底源**。实测的坑：
@@ -1488,10 +1492,11 @@ class Music2t58Spider:
         第一层与兜底源**都**挂代理（proxy_fallback=True）：源站按出口 IP 封禁时两个域名
         直连全不通，只有代理这条线路还能出数据（见 PROXY_API_PATH）。
 
-        整段受 REQUEST_BUDGET 约束；超预算就当作"这首这次拿不到播放信息"返回空，
-        页面照常渲染（只是没有播放器）—— 不能因为播放信息拿不到就把整页变成维护页。
+        整段受时间预算约束（budget，缺省 REQUEST_BUDGET）；超预算就当作"这首这次拿不到
+        播放信息"返回空，页面照常渲染（只是没有播放器）—— 不能因为播放信息拿不到就把整页
+        变成维护页。访客正在等结果时必须由调用方传个更小的 budget（见 fetch_play_url）。
         """
-        deadline = time.monotonic() + self.REQUEST_BUDGET
+        deadline = time.monotonic() + (budget or self.REQUEST_BUDGET)
         try:
             data = self._request_play_info(self.DOMAINS, self.DOMAIN_BAD_CACHE_KEY,
                                            '源站域名', song_id, f'song/{song_id}.html',

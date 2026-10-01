@@ -4,7 +4,7 @@
 其余（歌名/歌手/封面/歌词/歌手页链接）统统读库：
 
     ① 库里还没有这首歌（首次播放）        → 完整抓一次页面 + play.php + 歌词，落库
-    ② 有记录但直链过期（PLAYED_URL_TTL_MINUTES）→ **后台线程**刷一次直链（本页不等它）
+    ② 有记录但直链过期（PLAYED_URL_TTL_MINUTES）→ **当场**刷一次直链（这次访问等它）
 
 两个入口 / 一个出口：
     取数  get_for_page(sid)  —— 播放页 song() 与连播 song_info() 共用这一条路径
@@ -15,17 +15,20 @@
     只有真的按下播放，这首歌才算"此刻正在听"，列表反映的才是真实热度；
     也让"正在听"与"被爬虫/SEO 抓过的页面"区分开 —— 后者只落缓存，不进列表。
 
-为什么直链刷新要异步（见 _refresh_url_in_background）：
-    play.php 在源站不可达时会一直卡到 REQUEST_BUDGET（默认 25 秒）。同步刷新会把这次页面
-    渲染一起拖住，正是 README 7.10 里 502 的来源。异步之后页面永远不等它。
+为什么直链刷新从"后台异步"改回**同步**（2026-10-01，见 _refresh_url_now）：
+    异步那套是"本页照旧发库里那条、后台悄悄刷"，前提是库里那条还有效。可库里那条一旦
+    超过 CDN 寿命（酷我直链实测 60~73 分钟后返回 410 Gone）就是在把死链塞给访客 ——
+    当天全表 37958 行里有 33057 行正处于这种状态，于是每次打开播放页几乎必报
+    "播放链接失效，请刷新页面重试"；更糟的是 TTL 内不会再触发刷新，所以"刷新"也没用。
+    现在改成宁可在这次访问里等一次刷新（实测 4~6 秒，并用 PLAYED_URL_REFRESH_BUDGET
+    封顶，不会像以前那样顶到 REQUEST_BUDGET），也要把一条确定能播的直链交给访客。
 """
 import logging
-import threading
 from datetime import timedelta
 
 from django.conf import settings
 from django.core.cache import cache
-from django.db import OperationalError, connection
+from django.db import OperationalError
 from django.db.models import F, Q
 from django.utils import timezone
 
@@ -40,11 +43,6 @@ _CLEANUP_KEY = 'bz_played_cleanup_at'
 # 清理冷却时长（秒）。一小时一次足够，删的是几十天没动过的行
 _CLEANUP_COOLDOWN = 3600
 
-# 正在后台刷新直链的 sid 集合 + 锁：同一首歌同一时刻只允许一个刷新线程在跑。
-# 同一首歌可能被好几个人同时打开，不能一人起一个线程去打源站。
-_refreshing = set()
-_refreshing_lock = threading.Lock()
-
 
 def get_for_page(sid):
     """播放页取数（表优先）—— 返回与爬虫 fetch_song 同形态的 dict
@@ -58,10 +56,10 @@ def get_for_page(sid):
 
     row = PlayedSong.objects.filter(sid=sid).first()
     if row is not None and row.name:
-        # 命中缓存：直链过期就**丢给后台线程**去刷，本页立刻用库里现有的直链渲染，
-        # 一秒都不等它（见 _refresh_url_in_background）。
+        # 直链过期就**当场**刷一次再给访客：库里那条已经可能失效了（见文件头说明），
+        # 把它发出去只会换来一声"播放链接失效"。
         if _url_stale(row):
-            _refresh_url_in_background(row.sid)
+            _refresh_url_now(row)
         return _from_row(row)
 
     # 首次播放，或上次只抓到半截（连歌名都没有）：完整抓一次并落库
@@ -150,8 +148,9 @@ def _from_row(row):
 def _url_stale(row):
     """直链是否该刷新：没取过、或取到的时间早于 PLAYED_URL_TTL_MINUTES
 
-    只看 play_url_at，不看直链是否为空 —— 上次没抓到直链时也记了时间，
-    于是 TTL 之内不会每次开页面都去试，避免对源站的重复打扰。
+    只看 play_url_at，不看直链是否为空 —— 上次没抓到直链时也记了时间（只是记法改成了
+    "推迟 PLAYED_URL_REFRESH_RETRY_MINUTES 分钟"，见 _refresh_url_now），
+    于是重试窗口内不会每次开页面都去试，避免对源站的重复打扰。
     """
     ttl = settings.PLAYED_URL_TTL_MINUTES
     if ttl <= 0 or row.play_url_at is None:
@@ -159,47 +158,34 @@ def _url_stale(row):
     return timezone.now() - row.play_url_at > timedelta(minutes=ttl)
 
 
-def _refresh_url_in_background(sid):
-    """把"刷新直链"丢到后台线程去做，本页一秒都不等 —— 页面不再被源站拖慢的关键
+def _refresh_url_now(row):
+    """**在访客这次请求里**同步刷一次直链，把新链接写回 row（失败保留旧直链、只推迟重试）
 
-    为什么值得异步：play.php 在源站不可达时会一直卡到 REQUEST_BUDGET（默认 25 秒）。
-    同步刷新等于让访客替源站的慢买单，还会把 uWSGI worker 占住 → 502（见 README 7.10）。
-
-    为什么本页沿用旧直链也没事：刷新门槛（PLAYED_URL_TTL_MINUTES，默认 60 分钟）刻意留在
-    CDN 直链真实有效期（实测 60~73 分钟）之内，所以此刻库里那条通常仍然能播；
-    后台刷好之后供**后续**访问使用。
-
-    同一首歌只放一个线程：_refreshing 是进程内的，同一 worker 重复触发直接跳过
-    （多 worker 时最多每 worker 一个，量级可接受）。
-    """
-    with _refreshing_lock:
-        if sid in _refreshing:
-            return
-        _refreshing.add(sid)
-    threading.Thread(target=_refresh_url_worker, args=(sid,), daemon=True).start()
-
-
-def _refresh_url_worker(sid):
-    """后台线程体：取新直链写回库；无论成败都把自己从"刷新中"里放出来
-
-    ⚠️ 子线程里读写数据库要用**它自己的连接**（Django 的数据库连接是线程私有的），
-    用完必须 close()，否则线程结束后连接会一直挂着（长跑站点会攒满连接）。
+    为什么不等后台：这次访问要用的就是这条直链（见文件头说明）。源站不可达时最坏要等
+    PLAYED_URL_REFRESH_BUDGET 秒，之后拿不到就退回旧直链 —— 至少访客不用为一次注定
+    失败的刷新等满 REQUEST_BUDGET（25 秒）。超预算时 _fetch_play_info 会自己返回空串，
+    这里按"没刷到"处理。
     """
     try:
-        url = Music2t58Spider().fetch_play_url(sid)
-        row = PlayedSong.objects.filter(sid=sid).first()
-        if row is None:
-            return
-        row.play_url_at = timezone.now()   # 刷不到也记时间：TTL 内不再反复去打源站
-        if url:
-            row.play_url = url[:1000]
-        _save(row, '直链刷新')
+        url = Music2t58Spider().fetch_play_url(
+            row.sid, budget=settings.PLAYED_URL_REFRESH_BUDGET)
     except Exception:
-        logger.exception('后台刷新直链失败：%s', sid)
-    finally:
-        connection.close()
-        with _refreshing_lock:
-            _refreshing.discard(sid)
+        logger.exception('刷新直链失败：%s', row.sid)
+        url = ''
+
+    if url:
+        row.play_url = url[:1000]
+        row.play_url_at = timezone.now()
+    else:
+        # 没刷到：把 play_url_at 回拨到"距离过期还差 PLAYED_URL_REFRESH_RETRY_MINUTES"的
+        # 位置 —— 效果是过这么久才会再次触发刷新。刻意**不**记成当前时间：那会把这条
+        # 已失效的直链锁满整个 TTL，期间每个访客都拿到死链、且不会再触发任何刷新
+        # （2026-10-01 全表 3282 行就是这么来的：play_url_at 一律晚于直链签发时间，
+        # 反向偏差 0 行 —— 单向偏差正是"续命"留下的指纹）。
+        row.play_url_at = timezone.now() - timedelta(
+            minutes=settings.PLAYED_URL_TTL_MINUTES
+            - settings.PLAYED_URL_REFRESH_RETRY_MINUTES)
+    _save(row, '直链刷新')
 
 
 def _fetch_full(sid):
