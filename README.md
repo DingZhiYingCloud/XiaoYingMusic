@@ -293,6 +293,7 @@ DB_ALERT_COOLDOWN_HOURS=24
 | `/my/likes.html` | 我的喜欢（未登录会跳登录页并记住回来） | 本地库 `Favorite` |
 | `/api/uc/code` | 发验证码：注册重发 / 登录验证码（**只接受 POST**，非页面） | UAC `login/send`、`verify/email|phone` |
 | `/api/favorite` | 切换「喜欢」状态（**只接受 POST**，非页面） | 本地库 `Favorite` |
+| `/feedback` | 意见反馈入口（服务端换一次性票据后 302 到小影托管的反馈页，见 16.7） | 小影反馈中心 |
 | `/sitemap.xml` | 站点地图（缓存 6 小时；只收录当前可收录的页面，见第十五章） | 歌手库 + `fetch_chart`（判榜单有没有数据）+ `fetch_home`（取歌曲链接） |
 
 翻页统一是在原地址后加 `/<页码>`，例如 `/singer/<sid>/2.html`、`/so/<keyword>/2.html`。
@@ -2191,6 +2192,7 @@ UAC 提供的是**账号体系**（14 个接口全是注册/登录/验证码/Tok
 | `/my/likes.html` | 我的喜欢。未登录会跳到登录页并记住回来 |
 | `/api/uc/code` | 发验证码（注册重发 / 登录验证码） |
 | `/api/favorite` | 切换喜欢状态 |
+| `/feedback` | 意见反馈入口：302 跳到小影托管的反馈页（登录用户由服务端换一次性票据，见 16.7） |
 
 - **未登录点心形**：接口返回 `need_login`，前端把用户带去登录页并记住当前页（见 `static/js/user.js`）。
 - **CSRF**：项目已启用 `CsrfViewMiddleware`，页面里的异步 POST 从 `<meta name="csrf-token">`
@@ -2206,4 +2208,49 @@ UAC 提供的是**账号体系**（14 个接口全是注册/登录/验证码/Tok
 - 改完模板记得重编译 CSS：`Web/static-src/css/tailwindcss.exe -i Web/static-src/css/input.css -o Web/static/css/output.css`。
   另外 **`DEBUG=False` 时 Django 会缓存模板**，改完模板要重启服务才看得到效果（本地验证时踩过）。
 - 模板里写注释**不要用跨行的 `{# #}`**：它只支持单行，跨行部分会被当正文渲染到页面上（踩过）。
+
+### 16.7 问题反馈中心（小影统一反馈系统）
+
+**零代码接入**：反馈页由小影托管（`{XIAOYING_API_BASE}/feedback/<APPID>/`），表单、附件上传、
+AI 审核、公开区与开发者联系方式都在那边，**本站不保存任何反馈数据**，只做一次跳转。
+
+托管页自带三个标签页：`提交反馈` / `公开区` / `我的反馈`（后两个只在登录后有意义）。
+
+| 项 | 说明 |
+|---|---|
+| 入口 | 页脚按钮、顶栏用户下拉菜单、移动端抽屉菜单，三处都指向本站的 `/feedback` |
+| 路由 | `Web/views/urls.py` 的 `feedback.entry` → `Web/services/feedback.py` |
+| 跳转 | 302 到 `{API_BASE}/feedback/{APPID}/`；登录用户带 `?ticket=xxx`，游客不带 |
+
+**登录态怎么传过去（本站唯一的逻辑）**：前端不能自己调换票接口 —— 那要把 UAC Token 交给
+浏览器。所以由**服务端**用 session 里的 Token 调 `POST /api/feedback/ticket` 换一张
+**一次性、5 分钟过期**的票据，只把票据拼进地址栏；反馈页消费票据后建立会话并 303 回干净地址，
+Token 不落在 URL、浏览器历史与服务器访问日志里。
+
+**换票失败一律降级为游客进入**（网络抖动 / Token 已失效 / 该端点不可用），不抛错、不打断跳转；
+游客也能匿名提交，只是提交后不带身份、在「我的反馈」里追踪不到。这条路径有本地用例覆盖。
+
+**APPID 必须复用 `XIAOYING_APP_ID`，不要另配、更不要写死**（`feedback.FEEDBACK_APP_ID` 就是
+`xiaoying_api.APP_ID`）。原因是线上与本地开发**指的不是同一个实例、APPID 也不同**（本地是自建
+小影实例，见 `.env` 的 `XIAOYING_API_BASE=http://127.0.0.1:8002`），而写错 APPID 是**静默失败**：
+实测填错时反馈页返回 404、`contacts` 接口返回 `20030 项目不存在或已停用`，两处都不报错，
+只有人点进去才发现。曾有一版把本地 APPID 写成默认值，线上因此整个入口不可用。
+
+**实测过的接口契约**（文档没写细则，以下为直接探接口所得，改动前请重新确认）：
+
+```
+POST /api/feedback/ticket          表单字段 token（用户 UAC Token），免签名
+    成功  {"code": 10000, "data": {"ticket": "..."}}
+    失败  {"code": 20010, "msg": "Token 无效: 不存在"}
+    缺参  {"code": 20001, "msg": "参数缺失: token(用户登录Token)"}
+
+GET  /api/feedback/contacts?app_id=<APPID>      免签名
+    成功  {"code": 10000, "data": {"app_id": "...", "app_name": "小影音乐网", "contacts": []}}
+    失败  {"code": 20030, "msg": "项目不存在或已停用"}
+```
+
+**没有做「开发者联系方式」弹窗**（托管页底部本来就展示同一份联系方式，且本站页脚已有读 `.env`
+的「联系我们」弹窗）。若要补做，需先在小影后台「问题反馈 → 反馈中心设置 → 各项目开发者联系方式」
+给本站配至少一条，**实测确认 `contacts` 数组元素的字段名之后再写** —— 该项目当前 `contacts`
+返回空数组，字段名（`label` / `value` / `url`？）无从验证，照猜写只会是"配了也不显示"。
 

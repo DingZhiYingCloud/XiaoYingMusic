@@ -20,10 +20,20 @@
                     {{ SITE_BRAND }}——免费音乐在线试听网站。免注册、免登录、免下载软件，打开网页即可在线听完整歌曲，
                     支持歌词同步滚动。
                 </p>
-                {# 联系方式入口：点开三种联系方式，值全部来自 .env（见 Web/services/site_info.py） #}
-                <button type="button" id="bz-contact-open" class="btn btn-primary btn-sm mt-4">
-                    <i class="fa fa-comments-o"></i>联系我们
-                </button>
+                {% comment %}
+                入口组：
+                - 联系我们：弹本地 .env 配的三种联系方式（见 Web/services/site_info.py）
+                - 意见反馈：跳到小影托管的反馈页；登录用户由服务端换一次性票据后跳转
+                  （Web/services/feedback.py），Token 不出服务端
+                {% endcomment %}
+                <div class="mt-4 flex flex-wrap gap-2">
+                    <button type="button" id="bz-contact-open" class="btn btn-primary btn-sm">
+                        <i class="fa fa-comments-o"></i>联系我们
+                    </button>
+                    <a href="{% url 'feedback' %}" target="_blank" rel="noopener" class="btn btn-outline btn-sm">
+                        <i class="fa fa-commenting-o"></i>意见反馈
+                    </a>
+                </div>
             </div>
 
             <nav>

@@ -44,8 +44,9 @@
                     <i class="fa fa-user-circle-o"></i>
                     <span class="hidden max-w-24 truncate sm:inline">{{ CURRENT_USER.display_name }}</span>
                 </summary>
-                <ul class="menu dropdown-content z-50 mt-3 w-36 rounded-box border border-base-300 bg-base-100 p-2 text-sm shadow-md">
+                <ul class="menu dropdown-content z-50 mt-3 w-40 rounded-box border border-base-300 bg-base-100 p-2 text-sm shadow-md">
                     <li><a href="/my/likes.html"><i class="fa fa-heart-o mr-2"></i>我的喜欢</a></li>
+                    <li><a href="{% url 'feedback' %}" target="_blank" rel="noopener"><i class="fa fa-commenting-o mr-2"></i>意见反馈</a></li>
                     <li><a href="/logout"><i class="fa fa-sign-out mr-2"></i>退出登录</a></li>
                 </ul>
             </details>

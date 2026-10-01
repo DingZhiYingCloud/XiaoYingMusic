@@ -20,6 +20,9 @@
             <li><a href="/list/djwuqu.html" data-nav="/list/djwuqu.html"><i class="fa fa-headphones w-4"></i>律动电音集</a></li>
             <li class="menu-title mt-2">发现音乐</li>
             <li><a href="/singerlist/index/index/index/index.html" data-nav="/singerlist/ /singer/"><i class="fa fa-user w-4"></i>歌手大全</a></li>
+            {# 移动端也放一个反馈入口（页脚有，但抽屉里更顺手）；跳小影托管的反馈页 #}
+            <li class="menu-title mt-2">帮助</li>
+            <li><a href="{% url 'feedback' %}" target="_blank" rel="noopener"><i class="fa fa-commenting-o w-4"></i>意见反馈</a></li>
         </ul>
 
         <div class="border-t border-base-300 p-4 text-xs leading-relaxed opacity-60">

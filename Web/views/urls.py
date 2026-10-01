@@ -1,7 +1,7 @@
 # 项目URL配置
 from django.urls import path, re_path
 
-from Web.views import request, users
+from Web.views import feedback, request, users
 
 urlpatterns = [
     path('', request.index, name='home'),
@@ -41,6 +41,10 @@ urlpatterns = [
     path('register.html', users.register_view, name='register'),
     # 登出走 GET：幂等操作，页面上就是个普通链接
     path('logout', users.logout_view, name='logout'),
+    # ---- 问题反馈中心（小影统一反馈系统，接入零代码）----
+    # 本站只做一次跳转：登录用户由服务端换一次性票据后跳到托管的反馈页，
+    # 游客直接进页面匿名提交。见 Web/services/feedback.py 的接入说明。
+    path('feedback', feedback.entry, name='feedback'),
     path('my/likes.html', users.my_likes, name='my_likes'),
     path('api/uc/code', users.send_code, name='uc_send_code'),
     path('api/favorite', users.toggle_favorite, name='toggle_favorite'),
