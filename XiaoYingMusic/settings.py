@@ -255,11 +255,17 @@ PLAYED_SHOW_MINUTES = float(os.getenv('PLAYED_SHOW_MINUTES', '30'))
 # 直链新鲜度（分钟）：PlayedSong.play_url 超过这个时间就调一次 play.php 刷新。
 # CDN 直链（酷我）实测 60~73 分钟后失效、请求返回 410 Gone，所以这里必须明显小于 60：
 # 取 45 是给"库里这条交给访客时一定还活着"留 15 分钟安全余量。与上面的展示窗口是两个独立语义。
-# ⚠️ 必须大于 PLAYED_URL_REFRESH_RETRY_MINUTES，否则刷新失败后会把直链"锁"到未来，永远不再刷。
 PLAYED_URL_TTL_MINUTES = float(os.getenv('PLAYED_URL_TTL_MINUTES', '45'))
-# 刷新失败后的重试间隔（分钟）：没刷到新直链时，把下次该刷新的时间推迟这么久。
-# 作用是在"源站不可达"时别让每次访问都白等一次刷新，同时又**不能**像以前那样把
-# play_url_at 记成当前时间 —— 那会把一条已失效的直链锁满整个 TTL，期间人人拿到死链。
+# 直链寿命（分钟）：超过它这条直链就**不敢再发给访客**了（CDN 实测 60~73 分钟失效，取下限 60）。
+# 与 PLAYED_URL_TTL_MINUTES 的区别：那个是"该刷新了"，这个是"已经可能播不了、宁可不发"。
+# 只在"刷新失败、拿不到新直链"时才起作用 —— 正常情况 TTL(45) < 寿命(60)，刷得比它早。
+# 没有这条兜底的话，源站整条不可达期间（两个出口 IP + 兜底源同时进冷却）页面会一直把过期的
+# 旧直链发出去，访客看到的是"播放链接失效，请刷新页面重试"——而刷新根本刷不掉。
+# ⚠️ 必须 >= PLAYED_URL_TTL_MINUTES。
+PLAYED_URL_LIFESPAN_MINUTES = float(os.getenv('PLAYED_URL_LIFESPAN_MINUTES', '60'))
+# 刷新失败后的重试间隔（分钟）：没刷到新直链时，这么久之内不再重试。
+# 作用是"源站不可达时别让每次访问都白等一次刷新"（全在冷却时刷新是毫秒级失败的，
+# 但源站只是慢的时候一次要等满 PLAYED_URL_REFRESH_BUDGET）。
 PLAYED_URL_REFRESH_RETRY_MINUTES = float(os.getenv('PLAYED_URL_REFRESH_RETRY_MINUTES', '5'))
 # 同步刷新的时间预算（秒）：刷新是在访客这次请求里等着的，必须封顶，否则源站不可达时
 # 会把 uWSGI worker 占满 REQUEST_BUDGET（默认 25 秒）→ 502（见 README 7.10）。

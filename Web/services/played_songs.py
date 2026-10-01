@@ -22,6 +22,14 @@
     "播放链接失效，请刷新页面重试"；更糟的是 TTL 内不会再触发刷新，所以"刷新"也没用。
     现在改成宁可在这次访问里等一次刷新（实测 4~6 秒，并用 PLAYED_URL_REFRESH_BUDGET
     封顶，不会像以前那样顶到 REQUEST_BUDGET），也要把一条确定能播的直链交给访客。
+
+"刷新了"不等于"刷到了"—— 所以还有一道寿命兜底（2026-10-01 补充，见 _link_expired）：
+    源站整条不可达时（两个出口 IP + 兜底源同时进 120 秒冷却，实测过），_alive_bases 返回
+    空列表，刷新会在**毫秒内失败**且一个新链接都拿不到。这时候要是还把库里那条旧直链发出去，
+    访客看到的还是"播放链接失效，请刷新页面重试"——而刷新根本刷不掉，因为源站这会儿就是不通，
+    要等冷却到期。所以：**已经超过 CDN 保证寿命的直链一律不发**，页面走「暂时听不了」的兜底
+    （连播那边因为 play_url 为空会直接跳过这首）。刷新失败的重试窗口也不再靠篡改 play_url_at
+    实现（那会谎报直链新鲜度），改用 cache 里的一个短标记，play_url_at 始终如实反映取链时间。
 """
 import logging
 from datetime import timedelta
@@ -43,6 +51,12 @@ _CLEANUP_KEY = 'bz_played_cleanup_at'
 # 清理冷却时长（秒）。一小时一次足够，删的是几十天没动过的行
 _CLEANUP_COOLDOWN = 3600
 
+# 刷新失败后的重试标记（cache 键前缀 + sid）：刷不到新直链时写一个，用来在
+# PLAYED_URL_REFRESH_RETRY_MINUTES 内跳过重试。
+# 为什么不复用 play_url_at 来做这件事：它必须如实反映"这条直链是什么时候取到的"，
+# 一旦为了节流去改写它，_link_expired 就判不出"这条已经过期、不能再发了"（踩过）。
+_RETRY_PREFIX = 'bz_played_url_retry_'
+
 
 def get_for_page(sid):
     """播放页取数（表优先）—— 返回与爬虫 fetch_song 同形态的 dict
@@ -60,6 +74,11 @@ def get_for_page(sid):
         # 把它发出去只会换来一声"播放链接失效"。
         if _url_stale(row):
             _refresh_url_now(row)
+        # 刷完还是过期（源站这会儿整条不可达，刷了也拿不到新的）：这条已经不敢发了，
+        # 让模板走「暂时听不了」、让连播跳过这首，比发一条播不了的链接诚实。
+        # 只改内存里的 row、不落库 —— 库里那条留着，等下重试窗口过去还能再刷。
+        if _link_expired(row):
+            row.play_url = ''
         return _from_row(row)
 
     # 首次播放，或上次只抓到半截（连歌名都没有）：完整抓一次并落库
@@ -148,23 +167,39 @@ def _from_row(row):
 def _url_stale(row):
     """直链是否该刷新：没取过、或取到的时间早于 PLAYED_URL_TTL_MINUTES
 
-    只看 play_url_at，不看直链是否为空 —— 上次没抓到直链时也记了时间（只是记法改成了
-    "推迟 PLAYED_URL_REFRESH_RETRY_MINUTES 分钟"，见 _refresh_url_now），
-    于是重试窗口内不会每次开页面都去试，避免对源站的重复打扰。
+    只看 play_url_at，不看直链是否为空 —— 上次没抓到直链时也留了重试标记，
+    于是重试窗口内不会每次开页面都去试，避免对源站的重复打扰（见 _refresh_url_now）。
     """
     ttl = settings.PLAYED_URL_TTL_MINUTES
     if ttl <= 0 or row.play_url_at is None:
         return True
+    if cache.get(_RETRY_PREFIX + row.sid):
+        return False
     return timezone.now() - row.play_url_at > timedelta(minutes=ttl)
 
 
-def _refresh_url_now(row):
-    """**在访客这次请求里**同步刷一次直链，把新链接写回 row（失败保留旧直链、只推迟重试）
+def _link_expired(row):
+    """这条直链是否已过 CDN 的**保证寿命**，过期就不该再发给访客了
 
-    为什么不等后台：这次访问要用的就是这条直链（见文件头说明）。源站不可达时最坏要等
-    PLAYED_URL_REFRESH_BUDGET 秒，之后拿不到就退回旧直链 —— 至少访客不用为一次注定
-    失败的刷新等满 REQUEST_BUDGET（25 秒）。超预算时 _fetch_play_info 会自己返回空串，
-    这里按"没刷到"处理。
+    与 _url_stale 的区别：那个算的是"该刷新了"（TTL，留余量），这个算的是"已经不敢发了"
+    （寿命）。正常情况刷新都比寿命早，只有"源站整条不可达、刷新也拿不到新链"时才会走到这里。
+    拿不到直链的空行不算（没有 play_url_at 就没法判龄，按未过期处理）。
+    """
+    if row.play_url_at is None:
+        return False
+    return timezone.now() - row.play_url_at > timedelta(
+        minutes=settings.PLAYED_URL_LIFESPAN_MINUTES)
+
+
+def _refresh_url_now(row):
+    """**在访客这次请求里**同步刷一次直链，拿到就写回 row
+
+    没刷到（源站不可达、超预算）时不改 row，只写一个重试标记 —— 库里那条旧直链留着，
+    由 get_for_page 的寿命判断决定还发不发得出去。
+
+    为什么要封顶预算：这次请求是访客在等的。源站不可达时最坏要等
+    PLAYED_URL_REFRESH_BUDGET 秒，之后拿不到就按"没刷到"处理，而不是让访客为一次
+    注定失败的刷新等满 REQUEST_BUDGET（25 秒）。
     """
     try:
         url = Music2t58Spider().fetch_play_url(
@@ -176,16 +211,13 @@ def _refresh_url_now(row):
     if url:
         row.play_url = url[:1000]
         row.play_url_at = timezone.now()
-    else:
-        # 没刷到：把 play_url_at 回拨到"距离过期还差 PLAYED_URL_REFRESH_RETRY_MINUTES"的
-        # 位置 —— 效果是过这么久才会再次触发刷新。刻意**不**记成当前时间：那会把这条
-        # 已失效的直链锁满整个 TTL，期间每个访客都拿到死链、且不会再触发任何刷新
-        # （2026-10-01 全表 3282 行就是这么来的：play_url_at 一律晚于直链签发时间，
-        # 反向偏差 0 行 —— 单向偏差正是"续命"留下的指纹）。
-        row.play_url_at = timezone.now() - timedelta(
-            minutes=settings.PLAYED_URL_TTL_MINUTES
-            - settings.PLAYED_URL_REFRESH_RETRY_MINUTES)
-    _save(row, '直链刷新')
+        _save(row, '直链刷新')
+        return
+
+    # 没刷到：PLAYED_URL_REFRESH_RETRY_MINUTES 内不再重试。
+    # 刻意**不**动 play_url_at：它一旦被改写，_link_expired 就判不出这条已经过期了。
+    cache.set(_RETRY_PREFIX + row.sid, 1,
+              int(settings.PLAYED_URL_REFRESH_RETRY_MINUTES * 60))
 
 
 def _fetch_full(sid):
