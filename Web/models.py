@@ -78,12 +78,16 @@ class Singer(models.Model):
 
     @property
     def pic(self):
-        """展示用的头像地址：图床外链优先，还没传上去就用源站原图顶着
+        """展示用的头像地址：**源站原图优先**，没有才用图床外链
 
-        封面是逐张上传的（两万多个，要跑很久），过程中绝大多数还没有图床外链；
-        让模板统一读 pic，页面就不会出现"一半图一半空"，也不必在模板里写回退逻辑。
+        2026-10-01：小影图床（free.picui.cn）上的图**全部 404** 了 —— 实测 cover
+        列抽 5 位全是 404，而同一批的源站原图（gimg3.baidu.com 中转的 kuwo 头像）
+        全部 200 仍然可用。所以把优先级倒过来，页面立刻恢复。
+
+        两列地址一直都在库里，所以以后图床恢复、或换别家图床，把这两行换回去即可，
+        不用重爬 247 页列表（这也是当初把 source_pic 留一份的原因）。
         """
-        return self.cover or self.source_pic
+        return self.source_pic or self.cover
 
 
 class SingerSong(models.Model):

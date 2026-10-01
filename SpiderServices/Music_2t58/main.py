@@ -383,7 +383,10 @@ class Music2t58Spider:
                 session.cookies.set('PHPSESSID', value)
         # 绑出站源 IP：先绑当前可用的第一个（见 SOURCE_IPS）。真正抓取时 _get_html 还会
         # 逐个换绑，这里只是让不经过 _get_html 的调用也有个合理默认。
-        ip = cls._alive_source_ips()[0]
+        # 全部出口都在冷却时 _alive_source_ips 会返回空列表（那种情况抓取会直接走代理），
+        # 此时就不绑，交给内核挑。
+        ips = cls._alive_source_ips()
+        ip = ips[0] if ips else ''
         if ip:
             adapter = _SourceIPAdapter((ip, 0))
             session.mount('http://', adapter)
@@ -632,17 +635,21 @@ class Music2t58Spider:
     def _alive_source_ips(cls):
         """挑出不在冷却期内的出口 IP，供 _get_html 逐个试
 
-        返回 [''] 表示「不绑定源地址、交给内核挑」，两种情况都这样：
-          · 没配 SOURCE_IPS —— 单公网 IP 的机器就该走默认出口；
-          · 配的 IP 全在冷却里 —— 都刚试失败了，但总得留一次机会。
+        没配 SOURCE_IPS 时返回 ['']，表示「不绑定源地址、交给内核挑」—— 单公网 IP 的
+        机器就该走默认出口。
+
+        全都在冷却里时返回**空列表**（而不是退回 ['']）：调用方的 IP 循环会直接跳过，
+        立刻走代理。退回 [''] 等于再直连试一次，而在"两个出口都被封"这种最坏情况下
+        （2026-10-01 实测就是），它要白等一整个 connect 超时，再叠上代理很容易顶破
+        REQUEST_BUDGET —— 那正是"播放链接失效""暂无数据"的来源。等冷却到期会自然重新试直连。
 
         按 IP **整体**冷却，而不是"IP × 域名"的组合：出口被封是整机级故障、一挂全挂，
         所以某个 IP 在一个域名上撞了失败，就没必要再拿到别的域名上试。代价是某个 IP 只对
-        个别域名不通时也会被整体跳过 —— 但那是少数情况，且 300 秒冷却到期后会重新探测。
+        个别域名不通时也会被整体跳过 —— 但那是少数情况，且冷却到期后会重新探测。
         """
         if not cls.SOURCE_IPS:
             return ['']
-        return cls._alive_bases(cls.SOURCE_IPS, cls.SOURCE_IP_BAD_CACHE_KEY) or ['']
+        return cls._alive_bases(cls.SOURCE_IPS, cls.SOURCE_IP_BAD_CACHE_KEY)
 
     @classmethod
     def _bind_source_ip(cls, session, ip):
@@ -1117,11 +1124,19 @@ class Music2t58Spider:
 
         # 命中长缓存：直链按它自己的短 TTL（CACHE_TTL_PLAY_MINUTES）单独刷新，
         # 因为 CDN 直链的时效比歌曲信息短得多。
-        data['play_url'] = self._cached(
-            self._cache_key('song_play', sid),
-            lambda: self._fetch_play_info(sid)['play_url'],
-            self._play_ttl(),
-        )
+        #
+        # 刷新失败（源站全在冷却、超预算）时**留空**，别把异常抛出去：那会把整页打成 500，
+        # 而"播放信息这次没拿到"本来就只该表现为"这个页面暂时没有播放器"
+        # （理由同 _fetch_play_info 的说明）。要不要回落到旧直链由 _cached 自己负责。
+        try:
+            data['play_url'] = self._cached(
+                self._cache_key('song_play', sid),
+                lambda: self._fetch_play_info(sid)['play_url'],
+                self._play_ttl(),
+            )
+        except Exception as e:
+            logger.warning('歌曲 %s 的播放直链刷新失败，本次留空：%s', sid, e)
+            data['play_url'] = ''
         return data
 
     def _do_fetch_song(self, sid):
