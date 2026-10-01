@@ -229,27 +229,36 @@ class Music2t58Spider:
     # 反之亦然（两边是不同机房的独立站点，可达性互不相关）。
     FALLBACK_BAD_CACHE_KEY = '2t58_bad_fallbacks'
 
-    # ============ 巨量代理：直连失败后的备用线路 ============
+    # ============ 代理 IP：直连失败后的备用线路（走小影 API 的 51代理）============
     # 某条源直连拿不到时，换这条线路对**同一条源**再试一遍（页面与播放接口都是）。
     #
     # 为什么第一层也挂：源站是按**来源 IP** 封的（见 _SourceIPAdapter），实测被封时
     # 两个域名一起直连不通（TCP 丢包 / 直接 444）。2026-09-26 实测：这种状态下经代理
     # 节点访问 music.2t58.com **能正常过验证并拿到真实页面**（8 条节点里 3 条可用），
     # 所以代理不是"没意义"，而是直连被封时唯一还能出数据的路。
-    # 已知限制：代理服务商自己挡了 www.2t58.com（HTTPS 层 403，且 http://example.com/
-    # 经同一代理返回的错误页一模一样，是代理侧 ACL），所以挂代理时通常只有 music 这条
-    # 能成 —— 这是正常的，不代表代码有问题。
     #
     # 为什么一次取多条、逐条试：这是动态代理，平台文档明确"节点到期后连接会失败，
     # 需重新提取"；实测一批节点里确实有连 TLS 握手都过不去的。所以**每次直连失败都实时
     # 重新提取一批**（不做任何缓存，取回来的节点过期即弃），挨个试，一条不通就换下一条，
     # 而不是逮着同一条反复重试。
     #
-    # 接口在平台侧（小影 API），巨量的业务编号/密钥/代理账密都由平台 .env 持有，
-    # 调用方**什么都不用填**，只需平台签名（复用 Web/services/xiaoying_api）。
+    # 接口在平台侧（小影 API），51代理的账号三件套（uid / accessName / accessPassword）
+    # 与套餐标识（packid / rid）都由平台 .env 持有，调用方**什么都不用填**，
+    # 只需平台签名（复用 Web/services/xiaoying_api）。
+    #
+    # 51代理是**隧道 + 账密**模式：每条里的 `ip` / `port` 是各地出口（仅作参考），
+    # `proxy` 才是能直接用的完整 URL —— 账密 + **固定网关**（形如 …@42.193.143.242:17890，
+    # 一批节点共用同一个网关，靠账密区分出口）。所以**不需要**去它后台配 IP 白名单；
+    # 也别拿 ip:port 裸连，那样连不上代理。
+    # 实测（2026-09-27，小影 API 更新后）：经它抓 www.2t58.com 能自动过验证拿到真实首页
+    # （3/3 节点成功，39 KB 含真实榜单）；而且 www 这条在它这儿是通的 —— 早期巨量线路
+    # 会被自己的 ACL 挡掉 www，51代理没有这个限制。
+    #
     # 取不到时静默降级 —— 代理只是备用线路，它自己出问题不该影响原有的直连行为。
-    PROXY_API_PATH = '/api/ProxyIp/juliang/proxies'
-    # 一次提取几条节点来试（.env 可调）。实测单条节点约 4/5 可用，取 3 条基本够。
+    # 要换回其它线路（如巨量）：只改下面这一行路径即可，_proxy_pool 两种返回结构都认。
+    PROXY_API_PATH = '/api/ProxyIp/51daili/proxies'
+    # 一次提取几条节点来试（.env 可调）。51代理的"数量"参数名是 qty（与它官方提取链接
+    # 一致）；实测传 num / count 都只会回 1 条，别写成 num。
     PROXY_NODE_COUNT = int(os.getenv('MUSIC_2T58_PROXY_NODES', '3'))
 
     # ============ 回源节流与快速失败（防 502）============
@@ -684,7 +693,7 @@ class Music2t58Spider:
 
         路径由本方法决定而不让调用方拼好整条 URL：否则切了域名还在用旧域名。
 
-        每条源都是**先直连、直连失败再实时取巨量代理试一遍**（见 _retry_via_proxy）；
+        每条源都是**先直连、直连失败再实时取一批代理试一遍**（见 _retry_via_proxy）；
         代理救回来时**不**冷却这条源 —— 那说明源站本身没问题，是我们自己的直连出口不通，
         冷却它只会让接下来的请求白白少一条路。整个过程受 REQUEST_BUDGET 约束，超预算
         就快速失败，避免把 worker 拖到 nginx 超时（那是 502 的直接成因）。
@@ -732,7 +741,7 @@ class Music2t58Spider:
         第一层"全部在冷却中"（一条都没试）同样会走到这里：冷却本身就表示这些域名
         当前不可用，这时不去兜底，页面就只能一直显示维护提示了。
 
-        每条兜底源都是**先直连、直连不通才挂巨量代理**（见 _retry_via_proxy），
+        每条兜底源都是**先直连、直连不通才挂代理**（见 _retry_via_proxy），
         两条线路都失败才把这条源标记冷却 —— 只有代理救回来时**不**冷却：那说明源站
         本身没问题，是我们自己的直连线路不通，冷却它只会让接下来的请求白白少一条路。
 
@@ -770,10 +779,10 @@ class Music2t58Spider:
                 f'兜底源全部处于冷却中，{self.DOMAIN_COOLDOWN} 秒后自动重试：{path}')
         raise first_error or last_error
 
-    # ============ 巨量代理线路（备用通道，配置见 PROXY_API_PATH）============
+    # ============ 代理线路（备用通道，配置见 PROXY_API_PATH）============
     @classmethod
     def _proxy_pool(cls):
-        """实时提取一批巨量代理节点，返回能直接传给 requests 的 proxies 列表
+        """实时提取一批代理节点，返回能直接传给 requests 的 proxies 列表
 
         每次调用都重新提取、**不做任何缓存**：动态代理到期即失效，缓存下来只会拿到
         一批死节点（见 PROXY_API_PATH）。
@@ -788,25 +797,30 @@ class Music2t58Spider:
         try:
             resp = requests.get(
                 f'{API_BASE}{cls.PROXY_API_PATH}',
-                params=auth_params({'num': cls.PROXY_NODE_COUNT}),
+                params=auth_params({'qty': cls.PROXY_NODE_COUNT}),
                 timeout=10,
             )
             data = resp.json()
         except (requests.RequestException, ValueError) as e:
-            logger.warning('提取巨量代理失败，本次只走直连：%s', e)
+            logger.warning('提取代理失败，本次只走直连：%s', e)
             return []
         if data.get('code') != 10000:
-            logger.warning('提取巨量代理被拒绝，本次只走直连：%s', data.get('msg'))
+            logger.warning('提取代理被拒绝，本次只走直连：%s', data.get('msg'))
             return []
         pool = []
         for item in (data.get('data') or {}).get('proxies') or []:
+            # 优先用现成的完整 URL（proxy 字段，自带账密；51代理与巨量都给了）；
+            # 只有缺了它才退回 ip / port 自己拼 —— 那是老接口 / 纯白名单模式的线路才有的事，
+            # 拼出来能不能用取决于对方是否按 IP 放行。
             node = item.get('proxy')
+            if not node and item.get('ip') and item.get('port'):
+                node = f"http://{item['ip']}:{item['port']}"
             if node:
                 pool.append({'http': node, 'https': node})
         return pool
 
     def _retry_via_proxy(self, call, what, deadline):
-        """直连失败后，实时取一批巨量代理节点逐个重试；全部失败返回 None
+        """直连失败后，实时取一批代理节点逐个重试；全部失败返回 None
 
         call(proxies) 由调用方提供：返回 None 或抛异常都算这一次没成。
         节点现取现用、不缓存，一条不通就换下一条 —— 动态代理本来就短命，
@@ -1490,7 +1504,7 @@ class Music2t58Spider:
         song_id 与 song_path 都必须用**该源自己的写法**，由调用方负责转码 ——
         两站的 id 形态不同，传错了不会报错，只会安静地返回另一首歌的数据。
 
-        proxy_fallback=True 时，某条源直连失败会再实时取巨量代理试一遍；
+        proxy_fallback=True 时，某条源直连失败会再实时取一批代理试一遍；
         两条线路都失败才算这条源不可用、标记冷却 —— 只有代理救回来时不冷却，
         理由同 _fetch_from_fallback。deadline 见 REQUEST_BUDGET。
         """
