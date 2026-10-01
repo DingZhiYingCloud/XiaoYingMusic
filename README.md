@@ -247,7 +247,7 @@ DB_ALERT_COOLDOWN_HOURS=24
 | `MUSIC_2T58_PROXY_NODES` | 某条源直连失败时，一次实时取几条代理节点来试（见 7.9） | `3` |
 | `MUSIC_2T58_SOURCE_QPS` | 出站节流：每秒最多向源站发几次（**进程内**限速，全站上限 = 进程数 × 该值，`0`=关闭）（见 7.10） | `2` |
 | `MUSIC_2T58_THROTTLE_MAX_WAIT` | 领不到出站令牌时最多等几秒，等不到就放弃本次回源（见 7.10） | `5` |
-| `MUSIC_2T58_CONNECT_TIMEOUT` | 回源连接超时（秒）。被封时源站丢包，connect 会卡到超时，取小值快速失败（见 7.10） | `5` |
+| `MUSIC_2T58_CONNECT_TIMEOUT` | 回源连接超时（秒）。被封时源站丢包，connect 会卡到超时，**取小值快速失败**（见 7.10） | `3` |
 | `MUSIC_2T58_READ_TIMEOUT` | 回源读取超时（秒）（见 7.10） | `10` |
 | `MUSIC_2T58_REQUEST_BUDGET` | 一次回源（一个页面 / 一次播放信息）的总时间预算（秒），必须明显小于 nginx 的 60 秒（见 7.10） | `25` |
 | `MUSIC_2T58_SOURCE_IPS` | 爬虫出站绑定的源 IP，**可写多个**（逗号分隔）：被封的自动跳过、换下一个。仅在部署机 IP 被源站拦截时才需要（见 7.5） | 空（交给内核选） |
@@ -648,7 +648,7 @@ accessPassword）与套餐标识（packid / rid）全部由平台侧 `.env` 持�
 只作用于源站的 HTTP 请求；平台代理接口与第三方歌词接口（`js.eev3.com`）都不限速。
 ⚠️ 这是**进程内**限速，全站上限 = 进程数 × 该值（当前 `4 × 2 = 8 QPS`）；填 `0` 关闭。
 
-**② 别死等 —— 缩短连接超时**（`MUSIC_2T58_CONNECT_TIMEOUT`，默认 5 秒）
+**② 别死等 —— 缩短连接超时**（`MUSIC_2T58_CONNECT_TIMEOUT`，默认 3 秒）
 
 被封时源站是**丢包**（不是 403），`connect` 会一直卡到超时，所以 connect 取小值快速失败；
 读取超时单独配（`MUSIC_2T58_READ_TIMEOUT`，默认 10 秒，页面只有几十 KB，够用）。
@@ -679,7 +679,7 @@ accessPassword）与套餐标识（packid / rid）全部由平台侧 `.env` 持�
 |---|---|---|
 | `MUSIC_2T58_SOURCE_QPS` | 出站节流：每秒最多向源站发几次（进程内，`0`=关闭） | `2` |
 | `MUSIC_2T58_THROTTLE_MAX_WAIT` | 领不到令牌最多等几秒，等不到就放弃本次回源 | `5` |
-| `MUSIC_2T58_CONNECT_TIMEOUT` | 回源连接超时（秒） | `5` |
+| `MUSIC_2T58_CONNECT_TIMEOUT` | 回源连接超时（秒） | `3` |
 | `MUSIC_2T58_READ_TIMEOUT` | 回源读取超时（秒） | `10` |
 | `MUSIC_2T58_PROXY_READ_TIMEOUT` | **经代理时**的读取超时（秒）。半死节点挂到超时才失败，取小值快点换下一个 | `6` |
 | `MUSIC_2T58_REQUEST_BUDGET` | 一次回源的总时间预算（秒），必须明显小于 nginx 的 60 秒 | `25` |

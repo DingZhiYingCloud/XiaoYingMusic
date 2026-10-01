@@ -277,7 +277,12 @@ class Music2t58Spider:
 
     # 连接超时 / 读取超时（秒）。被封时源站是**丢包**，connect 会一直卡到超时，
     # 所以 connect 取小值快速失败；页面本身只有几十 KB，read 给 10 秒足够。
-    CONNECT_TIMEOUT = float(os.getenv('MUSIC_2T58_CONNECT_TIMEOUT', '5'))
+    #
+    # connect 取 3 而不是 5（2026-10-01 下调）：**两个出口 IP 都被封**时，一次回源要按
+    # 「出口 × 域名」把失败各等一遍 —— 实测 5 秒时这一段就吃掉 15~20 秒，再挂代理很容易
+    # 顶破 REQUEST_BUDGET，worker 被占满就 502。封禁的表现是丢包，3 秒足够判定；
+    # 正常回源只有几十毫秒，完全不受影响。
+    CONNECT_TIMEOUT = float(os.getenv('MUSIC_2T58_CONNECT_TIMEOUT', '3'))
     READ_TIMEOUT = float(os.getenv('MUSIC_2T58_READ_TIMEOUT', '10'))
     TIMEOUT = (CONNECT_TIMEOUT, READ_TIMEOUT)
 
