@@ -1263,7 +1263,7 @@ CACHE_TTL_PLAY_MINUTES=60     # 直链单独刷新，所以播放始终是新的
 |---|---|---|
 | `PLAYED_URL_TTL_MINUTES` | 45 | **直链新鲜度**：超过它就**当场**刷一次直链再交给访客（见下）。必须 < 60（CDN 寿命下限） |
 | `PLAYED_URL_LIFESPAN_MINUTES` | 60 | **直链寿命**：超过它就**不敢再发**了（见下），只在"刷新失败、拿不到新链"时兜底。必须 ≥ `PLAYED_URL_TTL_MINUTES` |
-| `PLAYED_URL_REFRESH_RETRY_MINUTES` | 5 | **刷新失败后的重试间隔**：没刷到新直链时，这么久之内不再重试（见下） |
+| `PLAYED_URL_REFRESH_RETRY_MINUTES` | 1 | **刷新失败后的重试间隔**：没刷到新直链时，这么久之内不再重试（见下）。必须**短于** `MUSIC_2T58_DOMAIN_COOLDOWN`（120 秒） |
 | `PLAYED_URL_REFRESH_BUDGET` | 8 | **同步刷新的时间预算**（秒）：刷新在访客请求里等着，必须封顶，否则源站不可达会占满 worker → 502 |
 | `PLAYED_SHOW_MINUTES` | 30 | **展示窗口**：`last_played_at` 在它之内才算"正在听" |
 | `PLAYED_SHOW_COUNT` | 60 | 「大家正在听」最多显示几条（展示截断，不删数据） |
