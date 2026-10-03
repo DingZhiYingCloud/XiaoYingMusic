@@ -266,7 +266,9 @@ PLAYED_URL_LIFESPAN_MINUTES = float(os.getenv('PLAYED_URL_LIFESPAN_MINUTES', '60
 # 刷新失败后的重试间隔（分钟）：没刷到新直链时，这么久之内不再重试。
 # 作用是"源站不可达时别让每次访问都白等一次刷新"（全在冷却时刷新是毫秒级失败的，
 # 但源站只是慢的时候一次要等满 PLAYED_URL_REFRESH_BUDGET）。
-PLAYED_URL_REFRESH_RETRY_MINUTES = float(os.getenv('PLAYED_URL_REFRESH_RETRY_MINUTES', '5'))
+# ⚠️ 必须**短于** MUSIC_2T58_DOMAIN_COOLDOWN（默认 120 秒）：否则域名冷却早就过期、已经可以
+# 重试了，这个标记还挡着 —— 而这期间直链若已过寿命，页面就一直是「正在维护中」。
+PLAYED_URL_REFRESH_RETRY_MINUTES = float(os.getenv('PLAYED_URL_REFRESH_RETRY_MINUTES', '1'))
 # 同步刷新的时间预算（秒）：刷新是在访客这次请求里等着的，必须封顶，否则源站不可达时
 # 会把 uWSGI worker 占满 REQUEST_BUDGET（默认 25 秒）→ 502（见 README 7.10）。
 # 实测一次成功刷新 4~6 秒，取 8 留点余量。
