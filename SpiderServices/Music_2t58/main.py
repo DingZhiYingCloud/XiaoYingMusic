@@ -1583,15 +1583,23 @@ class Music2t58Spider:
         for base in alive:
             if deadline is not None:
                 self._check_budget(deadline)
-            data, error = self._post_play_info(base, song_id, song_path, session)
-            if error is not None and proxy_fallback:
+            # 出口 IP 全在冷却里 = 直连刚失败过（这台机器的出口被封），再直连一次只是白等
+            # 一个 connect 超时。与 _get_html 的 IP 循环保持同一个判断：那里是"没有可用出口
+            # 就跳过 IP 循环"，这里是"没有可用出口就跳过直连、直接走代理"。
+            # 没配出口 IP 时 _alive_source_ips() 返回 ['']（真值），照旧直连，不受影响。
+            # 实测价值：刷新一次直链原来要 6~9 秒（3 秒白等的直连 + 代理），
+            # 正好卡在 8 秒预算上、约 1/3 的机会被掐断；跳过之后 3~6 秒，稳稳落在预算内。
+            direct_worth_it = bool(self._alive_source_ips())
+            data, error = (self._post_play_info(base, song_id, song_path, session)
+                           if direct_worth_it else (None, None))
+            if proxy_fallback and (error is not None or not direct_worth_it):
                 data = self._retry_via_proxy(
                     lambda proxies: self._post_play_info(
                         base, song_id, song_path, session, proxies=proxies)[0],
                     f'播放接口 {base}', deadline)
             if data is not None:
                 return data
-            if error is not None:
+            if direct_worth_it and error is not None:
                 self._mark_base_bad(base, cache_key, label, error)
         return None
 
