@@ -194,6 +194,13 @@ class Music2t58Spider:
     # （见 _clear_cooldown）。
     DOMAIN_COOLDOWN = int(os.getenv('MUSIC_2T58_DOMAIN_COOLDOWN', '120'))
 
+    # 出口 IP 的冷却时长（秒）：**故意比域名冷却长得多**。
+    # 出口被封是"这台机器"级别的故障，实测会连续几天解不开（2026-10-01 起两个出口就一直不通），
+    # 而每 120 秒去重试一次直连，要先白等 2 个 connect 超时（3 秒 × 2 个出口 = 6 秒）——
+    # 正好把"刷新播放直链"那 8 秒预算吃掉大半，实测整条刷新路径要 12.84 秒、直接超预算失败。
+    # 取 30 分钟：直连能通当然好，不通也不至于每次都拿 6 秒去撞墙，出数据的事交给代理（见 7.9）。
+    SOURCE_IP_COOLDOWN = int(os.getenv('MUSIC_2T58_SOURCE_IP_COOLDOWN', '1800'))
+
     # 各域名的冷却到期时间 {域名: 时间戳}，多进程共享（见 _alive_bases）
     DOMAIN_BAD_CACHE_KEY = '2t58_bad_domains'
 
@@ -605,13 +612,18 @@ class Music2t58Spider:
         now = time.time()
         return [b for b in bases if bad.get(b, 0) <= now]
 
-    def _mark_base_bad(self, base, cache_key, label, reason):
-        """把一条基址标记为冷却中，同时记一条日志，方便直接从线上日志看出哪条不行了"""
+    def _mark_base_bad(self, base, cache_key, label, reason, cooldown=None):
+        """把一条基址标记为冷却中，同时记一条日志，方便直接从线上日志看出哪条不行了
+
+        cooldown 不传就用 DOMAIN_COOLDOWN；出口 IP 要传 SOURCE_IP_COOLDOWN（更长的那个，
+        理由见常量定义）。
+        """
+        cooldown = cooldown or self.DOMAIN_COOLDOWN
         bad = cache.get(cache_key) or {}
-        bad[base] = time.time() + self.DOMAIN_COOLDOWN
-        cache.set(cache_key, bad, self.DOMAIN_COOLDOWN * 4)
+        bad[base] = time.time() + cooldown
+        cache.set(cache_key, bad, cooldown * 4)
         logger.warning('%s %s 抓取失败，冷却 %s 秒后重试：%s',
-                       label, base, self.DOMAIN_COOLDOWN, reason)
+                       label, base, cooldown, reason)
 
     @classmethod
     def _clear_cooldown(cls, cache_key):
@@ -717,7 +729,19 @@ class Music2t58Spider:
         """
         deadline = time.monotonic() + self.REQUEST_BUDGET
         first_error = None
-        for base in self._alive_bases(self.DOMAINS, self.DOMAIN_BAD_CACHE_KEY):
+        alive = self._alive_bases(self.DOMAINS, self.DOMAIN_BAD_CACHE_KEY)
+        if not alive:
+            # 全在冷却里 → 下面的循环一条都不会试。直连刚失败过、没必要再撞，但**代理必须试**：
+            # 代理走的是独立线路，跟我们的出口 IP 没关系（实测两个出口 IP 都被源站封死时，
+            # 只有代理能出数据）。不试的话，域名一进冷却就彻底出不了数据 —— 表现为播放直链
+            # 一直刷不到、页面只剩「正在维护中」（2026-10-03 线上实测：全冷却时刷新 0.00 秒就放弃）。
+            html = self._retry_via_proxy(
+                lambda proxies: self._fetch_html(f'{self.DOMAINS[0]}{path}', proxies=proxies),
+                f'源站页面 {self.DOMAINS[0]}{path}（源站域名全在冷却，改走代理）', deadline)
+            if html is not None:
+                return html
+            return self._fetch_from_fallback(fallback_path or path, first_error, deadline)
+        for base in alive:
             url = f'{base}{path}'
             # 同一个域名换几个出口 IP 各试一次：出口被封是**整机级**故障（一挂全挂），
             # 比单条域名被限流更常见，所以先换 IP，再谈切域名、走代理。
@@ -731,7 +755,8 @@ class Music2t58Spider:
                 except Exception as e:
                     first_error = e
                     if ip:
-                        self._mark_base_bad(ip, self.SOURCE_IP_BAD_CACHE_KEY, '出口 IP', e)
+                        self._mark_base_bad(ip, self.SOURCE_IP_BAD_CACHE_KEY, '出口 IP', e,
+                                            cooldown=self.SOURCE_IP_COOLDOWN)
                 else:
                     # 抓到了 = 这组域名已经恢复，顺手把整组冷却清掉（见 _clear_cooldown）
                     self._clear_cooldown(self.DOMAIN_BAD_CACHE_KEY)
@@ -760,7 +785,17 @@ class Music2t58Spider:
         抛错时优先抛第一层那个：那才是根因，兜底失败通常只是连带结果。
         """
         last_error = None
-        for base in self._alive_bases(self.FALLBACK_BASES, self.FALLBACK_BAD_CACHE_KEY):
+        alive = self._alive_bases(self.FALLBACK_BASES, self.FALLBACK_BAD_CACHE_KEY)
+        if not alive:
+            # 兜底源全在冷却里 → 下面循环不会跑，但仍然试一次代理（理由见 _get_html）
+            html = self._retry_via_proxy(
+                lambda proxies: self._fetch_html(
+                    f'{self.FALLBACK_BASES[0]}{path}',
+                    session=self.fallback_session, proxies=proxies),
+                f'兜底源页面 {self.FALLBACK_BASES[0]}{path}（兜底源全在冷却，改走代理）', deadline)
+            if html is not None:
+                return self._rewrite_fallback_html(html)
+        for base in alive:
             url = f'{base}{path}'
             # 出口 IP 与第一层共用同一份冷却：被封的是**这台机器**，兜底源照样连不上
             for ip in self._alive_source_ips():
@@ -773,7 +808,8 @@ class Music2t58Spider:
                 except Exception as e:
                     last_error = e
                     if ip:
-                        self._mark_base_bad(ip, self.SOURCE_IP_BAD_CACHE_KEY, '出口 IP', e)
+                        self._mark_base_bad(ip, self.SOURCE_IP_BAD_CACHE_KEY, '出口 IP', e,
+                                            cooldown=self.SOURCE_IP_COOLDOWN)
                 else:
                     # 兜底源通了 = 它这一组已经恢复，清掉冷却（见 _clear_cooldown）。
                     # 刻意不碰第一层的冷却：那是另一个机房，它通不代表第一层也通。
@@ -1533,7 +1569,18 @@ class Music2t58Spider:
         两条线路都失败才算这条源不可用、标记冷却 —— 只有代理救回来时不冷却，
         理由同 _fetch_from_fallback。deadline 见 REQUEST_BUDGET。
         """
-        for base in self._alive_bases(bases, cache_key):
+        alive = self._alive_bases(bases, cache_key)
+        if not alive:
+            # 全在冷却里 → 下面循环不会跑。播放直链刷新就这一条路，不试代理就等于
+            # 这首歌在整个冷却期内永远刷不到新链（页面只剩「正在维护中」）——
+            # 而代理恰恰是两个出口 IP 都被封时唯一能出数据的线路（理由见 _get_html）。
+            if deadline is not None:
+                self._check_budget(deadline)
+            return self._retry_via_proxy(
+                lambda proxies: self._post_play_info(
+                    bases[0], song_id, song_path, session, proxies=proxies)[0],
+                f'播放接口 {bases[0]}（{label}全在冷却，改走代理）', deadline)
+        for base in alive:
             if deadline is not None:
                 self._check_budget(deadline)
             data, error = self._post_play_info(base, song_id, song_path, session)
