@@ -691,6 +691,21 @@ accessPassword）与套餐标识（packid / rid）全部由平台侧 `.env` 持�
 
 只有"请求真的发出去但失败了"（连接超时 / 被打回 / 人机验证过不去）才算源不可用。
 
+**另一种 502：代理连接池泄漏吃光 FD**（2026-10-04 复盘）
+
+与上面"worker 被占满"不是一回事 —— 这次是 **worker 的 FD 被泄漏耗光**。现场特征很好认：
+`ps` 里**某一个** worker 的 FD 数逼近 `ulimit -n`（默认 1024），其余 worker 只有几十个；
+被顶死的 FD 里绝大多数是指向 51代理网关（`42.193.143.242:17890`）的 `CLOSE-WAIT` socket。
+
+成因：`requests` 的 `HTTPAdapter.proxy_manager` 是**以完整代理串（含账密）为键**的字典，
+而 51代理**每次返回的账密都不同** —— 每批代理都会在长驻会话的适配器上新建一批连接池、
+且**永不回收**，池里的 socket 在对端关闭后一直挂在 `CLOSE-WAIT`。攒到 1024 后该 worker
+再也接不了新连接，nginx 报 `upstream prematurely closed connection` → 502。
+所以它是**随回源次数逐步累积**的，表现为"用久了才发作、只有打到那个 worker 才 502"。
+
+修复：`_retry_via_proxy` 每次用完代理（`finally`）调用 `_purge_proxy_pools`，把会话适配器里的
+代理连接池 `clear()` 掉 —— 只清代理池，**不动可复用的直连池**。
+
 **配置**：
 
 | 变量 | 说明 | 默认值 |

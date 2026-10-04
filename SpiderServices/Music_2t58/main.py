@@ -878,22 +878,51 @@ class Music2t58Spider:
         _SourceThrottled 快速失败。否则一批节点轮完（每个都要等超时）会把 worker
         拖过 nginx 的 60 秒，那正是 502 的成因。
         """
-        pool = self._proxy_pool()
-        for proxies in pool:
-            self._check_budget(deadline)
-            node = proxies['http'].rsplit('@', 1)[-1]   # 只留 ip:port，账密不进日志
-            try:
-                result = call(proxies)
-            except _SourceThrottled:
-                raise
-            except Exception as e:
-                logger.warning('%s 经代理 %s 失败：%s', what, node, e)
+        try:
+            pool = self._proxy_pool()
+            for proxies in pool:
+                self._check_budget(deadline)
+                node = proxies['http'].rsplit('@', 1)[-1]   # 只留 ip:port，账密不进日志
+                try:
+                    result = call(proxies)
+                except _SourceThrottled:
+                    raise
+                except Exception as e:
+                    logger.warning('%s 经代理 %s 失败：%s', what, node, e)
+                    continue
+                if result is not None:
+                    logger.info('%s 经代理 %s 成功', what, node)
+                    return result
+                logger.warning('%s 经代理 %s 未取到数据', what, node)
+            return None
+        finally:
+            # 无论成败都要回收本次经代理请求留下的连接池，否则会持续泄漏 FD（见下）
+            self._purge_proxy_pools()
+
+    def _purge_proxy_pools(self):
+        """回收本次经代理请求在会话里留下的连接池 —— 防 FD 泄漏（502 的根因）
+
+        requests 的 HTTPAdapter.proxy_manager 是**以完整代理串（含账密）为键**的字典，
+        而 51代理每次返回的账密都不同 —— 每批代理都会在长驻会话的适配器上新建一批
+        连接池、且**永不回收**，池里的 socket 在对端关闭后一直挂在 CLOSE-WAIT。
+        攒到 ulimit 上限后该 worker 再也接不了新连接，nginx 报
+        upstream prematurely closed connection → 502。
+        （2026-10-04 线上：单 worker 1023 个 FD 顶死 ulimit 1024，其中 1007 个
+        CLOSE-WAIT 指向 51代理网关 42.193.143.242:17890。）
+
+        只清代理连接池，**不动直连池**：直连池是可复用资产，不该为代理顺带丢掉。
+        """
+        for session in (getattr(self, 'session', None),
+                        getattr(self, 'fallback_session', None)):
+            if session is None:
                 continue
-            if result is not None:
-                logger.info('%s 经代理 %s 成功', what, node)
-                return result
-            logger.warning('%s 经代理 %s 未取到数据', what, node)
-        return None
+            for adapter in set(session.adapters.values()):
+                managers = getattr(adapter, 'proxy_manager', None)
+                if not managers:
+                    continue
+                for manager in managers.values():
+                    manager.clear()
+                managers.clear()
 
     def _fetch_html(self, url, session=None, proxies=None, _renewed=False):
         """抓单个 URL 的页面 HTML，自动处理人机验证（不做切换）
