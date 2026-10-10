@@ -63,6 +63,14 @@ class _CacheAdapter:
         else:
             backend.set(key, value, timeout)
 
+    def delete(self, key):
+        """删除一个键 —— 两种后端都支持。熔断标记的清除要用（见 _clear_upstream_down）"""
+        backend = self._get_backend()
+        if backend == 'mem':
+            _CacheAdapter._mem_store.pop(key, None)
+        else:
+            backend.delete(key)
+
     _mem_store = {}
 
 
@@ -313,6 +321,11 @@ class Music2t58Spider:
     # 标记期内所有回源立刻失败、页面秒出空数据；标记过期后自动重新探测一次，通了立刻清除标记。
     UPSTREAM_DOWN_KEY = '2t58_upstream_down'
     DOWN_FLAG_SECONDS = float(os.getenv('MUSIC_2T58_DOWN_FLAG_SECONDS', '60'))
+
+    # 熔断期内的回源预算（秒）：此时直连已知不通，**只给代理留这点时间**。
+    # 代理仍必须试 —— 出口被封时它是唯一能出数据的线路（实测经 51代理 1.7 秒就能拿到页面）；
+    # 代理节点短缓存后提取是毫秒级，6 秒足够试两个节点，超时就放弃本次、快速失败。
+    PROXY_ONLY_BUDGET = float(os.getenv('MUSIC_2T58_PROXY_ONLY_BUDGET', '6'))
 
     # 上面三组配置共用的令牌桶（延迟到首次用时才建，进程内单例）
     _LIMITER = None
@@ -755,11 +768,12 @@ class Music2t58Spider:
         同一套程序（兜底源也是同族站点），解析规则一旦失效会同时影响它们，切了也救不了；
         而空结果在搜索页是合法的。
         """
-        if self._upstream_down():
-            raise _SourceThrottled('上游整体不可用（熔断中），本次回源快速失败')
-        deadline = time.monotonic() + self.REQUEST_BUDGET
+        # 熔断中（上游整体不可用）：直连已知不通，跳过直连、只给代理留一点时间；
+        # 平时用完整预算。**代理照试** —— 它是出口被封时唯一能出数据的线路。
+        down = self._upstream_down()
+        deadline = time.monotonic() + (self.PROXY_ONLY_BUDGET if down else self.REQUEST_BUDGET)
         first_error = None
-        alive = self._alive_bases(self.DOMAINS, self.DOMAIN_BAD_CACHE_KEY)
+        alive = [] if down else self._alive_bases(self.DOMAINS, self.DOMAIN_BAD_CACHE_KEY)
         if not alive:
             # 全在冷却里 → 下面的循环一条都不会试。直连刚失败过、没必要再撞，但**代理必须试**：
             # 代理走的是独立线路，跟我们的出口 IP 没关系（实测两个出口 IP 都被源站封死时，
@@ -945,6 +959,8 @@ class Music2t58Spider:
                     continue
                 if result is not None:
                     logger.info('%s 经代理 %s 成功', what, node)
+                    # 代理能拿到数据 = 上游可达（只是本机直连出口不通），撤掉熔断标记
+                    self._clear_upstream_down()
                     return result
                 logger.warning('%s 经代理 %s 未取到数据', what, node)
             return None
@@ -1614,11 +1630,11 @@ class Music2t58Spider:
         播放信息"返回空，页面照常渲染（只是没有播放器）—— 不能因为播放信息拿不到就把整页
         变成维护页。访客正在等结果时必须由调用方传个更小的 budget（见 fetch_play_url）。
         """
-        if self._upstream_down():
-            # 上游整体不可用（熔断中）：播放信息直接给空，页面照常渲染（只是没有播放器），
-            # 免得每个播放页再排队等一遍超时（见 UPSTREAM_DOWN_KEY）。
-            return {'play_url': '', 'cover': '', 'cid': ''}
-        deadline = time.monotonic() + (budget or self.REQUEST_BUDGET)
+        # 熔断中：直连已知不通，预算收紧到只够走代理（**仍要试代理**，它是唯一能出数据的线路）；
+        # 平时用调用方给的预算。
+        down = self._upstream_down()
+        deadline = time.monotonic() + (
+            self.PROXY_ONLY_BUDGET if down else (budget or self.REQUEST_BUDGET))
         try:
             data = self._request_play_info(self.DOMAINS, self.DOMAIN_BAD_CACHE_KEY,
                                            '源站域名', song_id, f'song/{song_id}.html',
