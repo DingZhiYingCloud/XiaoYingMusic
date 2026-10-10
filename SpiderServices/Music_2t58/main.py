@@ -304,6 +304,16 @@ class Music2t58Spider:
     # ⚠️ 必须明显小于 nginx 的 60 秒，否则又会 502。
     REQUEST_BUDGET = float(os.getenv('MUSIC_2T58_REQUEST_BUDGET', '25'))
 
+    # ============ 全局熔断：上游整体不可用时的快速失败（防 502 雪崩）============
+    # 背景（2026-10-10 线上）：源站封了本机出口 IP 后，每个"库里没有"的歌曲页都要把
+    # 「直连超时 → 兜底源超时 → 两次代理提取」走一遍，单个请求能占住 worker 十几到二十几秒；
+    # 少数 worker 被这种慢请求占满后，全站（连纯读本地库的首页）都会排队超时 →
+    # nginx 大面积 502/504。熔断就是"上游整体不可用时别再一个个白等"：
+    # 只要有一批请求走到"第一层与兜底源全在冷却"这个尽头，就写一个标记（DOWN_FLAG_SECONDS 秒），
+    # 标记期内所有回源立刻失败、页面秒出空数据；标记过期后自动重新探测一次，通了立刻清除标记。
+    UPSTREAM_DOWN_KEY = '2t58_upstream_down'
+    DOWN_FLAG_SECONDS = float(os.getenv('MUSIC_2T58_DOWN_FLAG_SECONDS', '60'))
+
     # 上面三组配置共用的令牌桶（延迟到首次用时才建，进程内单例）
     _LIMITER = None
     _LIMITER_LOCK = threading.Lock()
@@ -641,6 +651,24 @@ class Music2t58Spider:
         """
         if cache.get(cache_key):
             cache.set(cache_key, {}, cls.DOMAIN_COOLDOWN)
+            # 有源通了 = 上游恢复，顺手撤掉熔断标记（见 UPSTREAM_DOWN_KEY）
+            cls._clear_upstream_down()
+
+    # ============ 全局熔断的三个小助手（见 UPSTREAM_DOWN_KEY）============
+    @classmethod
+    def _upstream_down(cls):
+        """上游是否处于熔断期：是则所有回源直接快速失败，立刻渲染空数据"""
+        return bool(cache.get(cls.UPSTREAM_DOWN_KEY))
+
+    @classmethod
+    def _mark_upstream_down(cls):
+        """标记上游整体不可用，DOWN_FLAG_SECONDS 秒内所有回源快速失败"""
+        cache.set(cls.UPSTREAM_DOWN_KEY, 1, int(cls.DOWN_FLAG_SECONDS))
+
+    @classmethod
+    def _clear_upstream_down(cls):
+        """上游恢复，撤掉熔断标记"""
+        cache.delete(cls.UPSTREAM_DOWN_KEY)
 
     # ============ 出口 IP 的选择与换绑（见 SOURCE_IPS）============
     @classmethod
@@ -727,6 +755,8 @@ class Music2t58Spider:
         同一套程序（兜底源也是同族站点），解析规则一旦失效会同时影响它们，切了也救不了；
         而空结果在搜索页是合法的。
         """
+        if self._upstream_down():
+            raise _SourceThrottled('上游整体不可用（熔断中），本次回源快速失败')
         deadline = time.monotonic() + self.REQUEST_BUDGET
         first_error = None
         alive = self._alive_bases(self.DOMAINS, self.DOMAIN_BAD_CACHE_KEY)
@@ -823,17 +853,40 @@ class Music2t58Spider:
                 return self._rewrite_fallback_html(html)
             self._mark_base_bad(base, self.FALLBACK_BAD_CACHE_KEY, '兜底源', last_error)
         if last_error is None:
+            # 走到这里 = **第一层与兜底源此刻全在冷却**，即上游整体不可用。
+            # 打上熔断标记，让接下来的请求快速失败，不再逐个去白等一遍超时（见 UPSTREAM_DOWN_KEY）。
+            self._mark_upstream_down()
             raise RuntimeError(
                 f'兜底源全部处于冷却中，{self.DOMAIN_COOLDOWN} 秒后自动重试：{path}')
         raise first_error or last_error
 
     # ============ 代理线路（备用通道，配置见 PROXY_API_PATH）============
+    # 代理节点短缓存时长（秒）。51代理接口有**频率限制**（实测提示
+    # "超出套餐限制,您的套餐只能1秒提取10个"），而调用方原本**每个失败请求**都提取一次，
+    # 量一大就整片被限流拒绝 —— 结果是"线路明明可用，却每次都是空池"，白等一遍超时。
+    # 缓存一小会儿既把提取频率压回限额内，又远短于节点寿命（失效即换批，最多晚这么多秒）。
+    # 进程内缓存，各 worker 各一份。
+    PROXY_POOL_CACHE_SECONDS = float(os.getenv('MUSIC_2T58_PROXY_CACHE_SECONDS', '20'))
+    _PROXY_POOL_CACHE = None   # (过期时间戳, pool)
+
     @classmethod
     def _proxy_pool(cls):
-        """实时提取一批代理节点，返回能直接传给 requests 的 proxies 列表
+        """取一批代理节点（带短缓存，见 PROXY_POOL_CACHE_SECONDS）
 
-        每次调用都重新提取、**不做任何缓存**：动态代理到期即失效，缓存下来只会拿到
-        一批死节点（见 PROXY_API_PATH）。
+        调用方拿到的永远是"最近的、还没过期"的一批；提取失败（含被限流）也会缓存一小会儿，
+        避免在故障/限流期间每个请求都去撞一次接口。真正的提取见 _extract_proxy_pool。
+        """
+        now = time.time()
+        cached = cls._PROXY_POOL_CACHE
+        if cached and cached[0] > now:
+            return cached[1]
+        pool = cls._extract_proxy_pool()
+        cls._PROXY_POOL_CACHE = (now + cls.PROXY_POOL_CACHE_SECONDS, pool)
+        return pool
+
+    @classmethod
+    def _extract_proxy_pool(cls):
+        """实时提取一批代理节点，返回能直接传给 requests 的 proxies 列表
 
         取不到（平台没配签名、接口报错、返回空）一律返回空列表，由调用方静默降级 ——
         代理是备用线路，它自己出问题不该改变原有的直连行为。
@@ -1561,6 +1614,10 @@ class Music2t58Spider:
         播放信息"返回空，页面照常渲染（只是没有播放器）—— 不能因为播放信息拿不到就把整页
         变成维护页。访客正在等结果时必须由调用方传个更小的 budget（见 fetch_play_url）。
         """
+        if self._upstream_down():
+            # 上游整体不可用（熔断中）：播放信息直接给空，页面照常渲染（只是没有播放器），
+            # 免得每个播放页再排队等一遍超时（见 UPSTREAM_DOWN_KEY）。
+            return {'play_url': '', 'cover': '', 'cid': ''}
         deadline = time.monotonic() + (budget or self.REQUEST_BUDGET)
         try:
             data = self._request_play_info(self.DOMAINS, self.DOMAIN_BAD_CACHE_KEY,
