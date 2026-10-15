@@ -27,7 +27,7 @@ from django.core.management.base import BaseCommand
 
 from SpiderServices.Music_2t58.main import Music2t58Spider
 from Web.models import Singer
-from Web.services import xiaoying_api
+from Web.services import outbound, xiaoying_api
 
 # 列表页的筛选维度：全部地区 / 全部性别 / 全部类型 / 全部字母
 ALL_FILTERS = ('index', 'index', 'index', 'index')
@@ -209,7 +209,7 @@ class Command(BaseCommand):
         """下载封面图，返回 (二进制内容, Content-Type)"""
         for attempt in range(DOWNLOAD_RETRY + 1):
             try:
-                resp = requests.get(url, headers=DOWNLOAD_HEADERS, timeout=20)
+                resp = outbound.request('get', url, headers=DOWNLOAD_HEADERS, timeout=20)
                 resp.raise_for_status()
             except requests.RequestException:
                 if attempt >= DOWNLOAD_RETRY:

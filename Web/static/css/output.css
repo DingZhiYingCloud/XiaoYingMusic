@@ -3919,6 +3919,11 @@
     opacity: 1;
   }
 }
+/* 可点击的音乐元素统一用手型光标（源码见 static-src/css/input.css 同名规则；
+   本机没有 tailwindcss.exe，改完源码不重编译不会生效，故在此同步一份） */
+a[href^="/song/"], [data-play-sid], [data-fav-sid] {
+  cursor: pointer;
+}
 @layer base {
   :where(:root),:root:has(input.theme-controller[value=light]:checked),[data-theme=light] {
     color-scheme: light;

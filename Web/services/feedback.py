@@ -13,9 +13,7 @@
 """
 import logging
 
-import requests
-
-from Web.services import user_session, xiaoying_api
+from Web.services import outbound, user_session, xiaoying_api
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +45,8 @@ def issue_ticket(token):
     if not token:
         return ''
     try:
-        resp = requests.post(
-            f'{FEEDBACK_BASE}/api/feedback/ticket',
+        resp = outbound.request(
+            'post', f'{FEEDBACK_BASE}/api/feedback/ticket',
             data={'token': token},
             timeout=TICKET_TIMEOUT,
             headers={'User-Agent': xiaoying_api.USER_AGENT},

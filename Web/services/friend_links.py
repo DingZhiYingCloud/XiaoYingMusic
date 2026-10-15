@@ -7,8 +7,7 @@ import logging
 import threading
 import time
 
-import requests
-
+from Web.services import outbound
 from Web.services.xiaoying_api import API_BASE, USER_AGENT, auth_params
 
 logger = logging.getLogger(__name__)
@@ -32,13 +31,12 @@ def _fetch_links():
     调用方靠这个区分决定要不要覆盖缓存 —— 否则一次网络抖动就会把全站友情链接清空一小时。
     """
     try:
-        resp = requests.get(
-            f'{API_BASE}{FRIEND_LINKS_PATH}',
+        resp = outbound.request(
+            'get', f'{API_BASE}{FRIEND_LINKS_PATH}',
             params=auth_params({'status': 'true'}),
             timeout=REQUEST_TIMEOUT,
             headers={'User-Agent': USER_AGENT},
         )
-        resp.raise_for_status()
         # 兼容接口返回错误结构（如 {"code":20011,"msg":"签名参数缺失...","data":null}）：
         # data 可能为 null，必须安全提取，否则 .get() 会抛 NoneType 异常
         payload = resp.json() or {}

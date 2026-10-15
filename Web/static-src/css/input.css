@@ -270,6 +270,19 @@
   .bz-deck.bz-playing .bz-disc::after { animation: none; opacity: 1; }
 }
 
+/* ============ 可点击的音乐元素统一用手型光标 ============
+ * 歌曲条目在列表页是 <a>（浏览器默认就是手型），但**播放页右栏的条目**和**心形按钮**
+ * 都是 <button>（默认是箭头），点起来就不像能点。这里统一成手型。
+ * 用 [href^="/song/"] 而不是 a：站内其它链接（歌手页、榜单页）不参与，
+ * 免得全站到处都是手型、反而看不出哪里能点。
+ * ⚠️ 下面把同一条规则同步进了 Web/static/css/output.css（编译产物）——本机没有
+ *    tailwindcss.exe，改完源码不重编译不会生效；等哪天真重编译了，两份内容一致，无影响。 */
+a[href^="/song/"],
+[data-play-sid],
+[data-fav-sid] {
+  cursor: pointer;
+}
+
 /* 需要自定义主题时取消注释（daisyui-theme.mjs 为此保留）：
  * @plugin "./daisyui-theme.mjs" {
  *   name: "mytheme";

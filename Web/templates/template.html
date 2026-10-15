@@ -156,6 +156,12 @@
     多这一次请求换掉"每个页面都要记着引用"的坑，脚本见 static/js/user.js。
     {% endcomment %}
     <script src="/static/js/user.js?v=v4"></script>
+    {% comment %}
+    歌曲链接的右键菜单（喜欢 / 下一首播放），全站加载、只在歌曲链接上生效。
+    为什么用右键、"下一首播放"在非播放页怎么跨页面带过去，都写在脚本头部
+    （static/js/song_menu.js）。
+    {% endcomment %}
+    <script src="/static/js/song_menu.js?v=v2"></script>
     {% block js %}{% endblock %}
 </body>
 

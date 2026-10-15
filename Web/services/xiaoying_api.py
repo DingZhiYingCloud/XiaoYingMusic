@@ -16,7 +16,7 @@ import os
 import secrets
 import time
 
-import requests
+from Web.services import outbound
 
 # 小影 API 基础地址（.env 覆盖；私有部署时指向自己的实例）
 API_BASE = os.getenv('XIAOYING_API_BASE', 'https://xiaoyingapi.com')
@@ -56,13 +56,12 @@ def auth_params(business_params):
 
 def post_form(path, data, timeout=10):
     """带签名的表单 POST，返回解析后的 JSON（是否成功由调用方判 code）"""
-    resp = requests.post(
-        f'{API_BASE}{path}',
+    resp = outbound.request(
+        'post', f'{API_BASE}{path}',
         data=auth_params(data),
         timeout=timeout,
         headers={'User-Agent': USER_AGENT},
     )
-    resp.raise_for_status()
     return resp.json() or {}
 
 
@@ -75,12 +74,12 @@ def post_multipart(path, files, data=None, timeout=30):
     所以只有"签名参数只放 query、不额外塞表单字段"时，两边算出的参数集才一致；
     多塞一个表单字段（比如 permission），服务端就会把它也算进签名 → 直接 20011。
     """
-    resp = requests.post(
-        f'{API_BASE}{path}',
+    url = f'{API_BASE}{path}'
+    resp = outbound.request(
+        'post', url,
         params=auth_params(data or {}),
         files=files,
         timeout=timeout,
         headers={'User-Agent': USER_AGENT},
     )
-    resp.raise_for_status()
     return resp.json() or {}

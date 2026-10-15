@@ -1,21 +1,22 @@
 /* ============ 播放页连播：队列 / 上一首·下一首 / 循环开关 / 原地换歌 ============
- * 数据来自页面的两处（都由 song.html 输出）：
- *   window.BZ_PLAYLIST  —— 连播队列：有「我的喜欢」就用它，一首都没有（含未登录）就用
- *                          「大家正在听」兜底（由 Web/views/request.py 的 _play_queue 决定）
+ * 数据来自页面注入的几份（都由 song.html 输出）：
+ *   window.BZ_PLAYLIST  —— 待播放列表（连播队列）的初始值：有收藏用收藏，否则用「猜你喜欢」
+ *   window.BZ_LIKED     —— 我的喜欢（收藏）
  *   window.BZ_SONG_DATA —— 当前这首（song_player.js 也读它）
  *
- * 队列的**显示位置有两种**，由 mode 决定（都带 data-play-sid，靠这一个属性就能找到）：
- *   mode='likes'  「我的喜欢」的列表在右栏（#bz-playlist），队列就是它
- *   mode='live'   队列是底部「大家正在听」（#bz-live-list），右栏保持空态/登录引导
- *   mode='empty'  两边都没有，没有队列（点上一首/下一首会提示"列表里还没有歌"）
- * 所以本文件**不假设列表在右栏**：找条目一律用 [data-play-sid]，
- * 重建列表（renderList）才只针对右栏那个 ol —— 它专门用来渲染「我的喜欢」。
+ * 右栏是**三个 tab**（切换见 setTab），三块列表各司其职：
+ *   猜你喜欢   —— 服务端渲染的推荐列表；点其中一首 = 把队列**整块换成这一块**（点中那首排到队首）
+ *   我的喜欢   —— 收藏列表；点其中一首同样会把队列换成这一块（收藏变化时本文件就地重渲染它）
+ *   待播放列表 —— 当前连播队列（#bz-playlist，本文件维护），决定"下一首是谁"
+ * 三块列表的条目都带 data-play-sid；`data-bz-list` 标记"这块是可选来源列表"，
+ * 点它里面的歌就按"整块换成队列"处理。所以找条目一律用 [data-play-sid]。
  *
  * 分工：本文件只决定"下一首是谁、什么时候换"，真正换歌（音频/封面/歌名/歌词）由
  * song_player.js 的 BZSongPlayer.load() 执行 —— 那边是唯一持有 audio 的地方。
  *
- * 另外它还负责定时刷新「大家正在听」那块（refreshLive）：播放页常被开着很久，
- * 不刷新的话那些"多久前"会停在旧值、新歌也进不来。走 /api/live，只读本地表。
+ * 另外它还保留了定时刷新「大家正在听」那块的老逻辑（refreshLive）。该模块已暂时下架、
+ * 页面上取不到 #bz-live-box，所以这段会自动跳过（见 refreshLive 首行的守卫与初始化里的
+ * elLiveBox 判断）；将来把那块加回来即可自动生效。走 /api/live，只读本地表。
  *
  * 为什么换歌要动地址栏（pushState）：原地换歌不刷新页面，但地址栏得跟着变，否则用户
  * 刷新会回到最开始那首、复制出去的链接也是错的。改了地址还要监听 popstate，不然浏览器
@@ -25,8 +26,12 @@
     'use strict';
 
     var LOOP_KEY = 'bz_loop';   // 循环开关的记忆（与播放器的其它记忆放在同一个命名空间）
+    // 「下一首播放」在**非播放页**下点时，先把歌记在这里（见 static/js/song_menu.js），
+    // 进播放页后由本文件补进队列（键名两边必须一致）
+    var PENDING_KEY = 'bz_play_next';
 
-    var queue = [];           // [{sid, title}]
+    var queue = [];           // 待播放列表（连播队列）[{sid, title}]
+    var likedSongs = [];      // 我的喜欢（收藏）[{sid, title}]
     var index = -1;           // 当前这首在队列里的位置；-1 = 不在队列里（比如从搜索页直接点进来的）
     var loop = false;         // 列表循环：开着时播完最后一首回到第一首
     var switching = false;    // 正在切歌，防连点造成并发请求
@@ -41,12 +46,14 @@
     // 换歌后地址栏就再也不跟着变了（踩过这个坑）。
     var playHistory = [];
 
-    // 列表区块的 DOM。收藏状态一变就要改写右栏那块（见 syncLiked），所以引用要留着
-    var elBox, elList, elTitle, elManage, elHint, elEmpty;
-    // 「大家正在听」那块（轮询刷新时要改写它）
+    // 右栏两块由本文件维护的列表 DOM（队列/收藏一变就要就地重渲染，所以引用留着）：
+    //   #bz-playlist    —— 待播放列表（连播队列）
+    //   #bz-likes-list  —— 我的喜欢（收藏）
+    var elQueueList, elQueueEmpty, elQueueHint;
+    var elLikesList, elLikesEmpty;
+    // 「大家正在听」那块：模块已下架、页面上取不到元素，保留引用只为让旧轮询逻辑能自动跳过
     var elLiveBox, elLiveList, elLiveCount;
-    var mode = 'likes';       // 队列来自哪：likes（我的喜欢）/ live（大家正在听）/ empty（都没有）
-    var loggedIn = false;     // 由页面注入：右栏空态那句提示只给登录用户看（未登录看登录引导）
+    var loggedIn = false;     // 由页面注入：空态那句提示只给登录用户看（未登录看登录引导）
 
     function read(key, def) {
         try {
@@ -231,18 +238,20 @@
         });
     }
 
-    /* ---------- 收藏联动 ----------
-     * 播放页的心形按钮（static/js/user.js）收藏成功后会调这里的 syncLiked，让列表当场跟着变 ——
-     * 否则用户收藏了却要刷新才看得到，很容易以为没生效。
-     *
-     * queue 与列表 DOM 是两份数据，必须一起改：queue 决定"下一首是谁"，DOM 只是它的显示。
-     * 所以这里改完 queue 就整块重建列表，序号与高亮一起归位，不必手工维护两套顺序。
+    /* ---------- 右栏三块列表的渲染 ----------
+     * 三块数据各自独立：
+     *   queue      —— 待播放列表（连播队列），本文件维护，决定"下一首是谁"
+     *   likedSongs —— 我的喜欢（收藏），收藏状态一变就重渲染这一块
+     *   猜你喜欢    —— 服务端渲染的静态列表（推荐）；本文件只负责"点它时把队列换成它"
+     * 列表 DOM 只是数据的显示，所以改完数据就整块重建列表，序号与高亮一起归位。
      */
-    function renderList() {
-        if (!elList) return;
-        elList.innerHTML = '';
-        for (var i = 0; i < queue.length; i++) {
-            var item = queue[i];
+
+    // 把一串 [{sid,title}] 渲染进某个 <ol>（三块列表共用同一套标记）
+    function fillList(el, songs) {
+        if (!el) return;
+        el.innerHTML = '';
+        for (var i = 0; i < songs.length; i++) {
+            var item = songs[i];
             var li = document.createElement('li');
             var btn = document.createElement('button');
             btn.type = 'button';
@@ -262,77 +271,46 @@
             btn.appendChild(no);
             btn.appendChild(name);
             li.appendChild(btn);
-            elList.appendChild(li);
+            el.appendChild(li);
         }
-        bindList(elList);     // 元素都换了新的，点击事件要重新绑（只绑这个列表，免得给底部那块重复挂）
+        bindList(el);     // 元素都换了新的，点击事件要重新绑（只绑这个容器）
+    }
+
+    // 重画「待播放列表」：队列条目 + 空态/提示的显隐
+    function renderList() {
+        fillList(elQueueList, queue);
+        if (elQueueList) elQueueList.classList.toggle('hidden', queue.length === 0);
+        if (elQueueEmpty) elQueueEmpty.classList.toggle('hidden', queue.length > 0);
+        if (elQueueHint) elQueueHint.classList.toggle('hidden', queue.length === 0);
         markCurrent(window.BZSongPlayer.sid());
     }
 
-    // 空列表下收藏一首，这块就该从"空态/大家正在听"变成真正的「我的喜欢」：标题、管理链接、
-    // 底部提示一起换，队列也整批换掉 —— 兜底队列里那些是别人的歌，不属于"我的喜欢"。
-    function switchToLikes() {
-        if (mode === 'likes') return;
-        mode = 'likes';
-        if (elTitle) elTitle.textContent = '我的喜欢';
-        if (elManage) elManage.classList.remove('hidden');
-        if (elHint) {
-            // 提示语从空态换成连播说明。这里用 textContent 覆盖：原来那句更简单，
-            // 且能走到这里说明已经登录了，不会丢掉未登录时的登录链接。
-            elHint.textContent = '点歌名直接切换，一首放完自动接下一首。';
+    // 重画「我的喜欢」（**刻意不动队列**：收藏一首不该把正在连播的列表整批换掉，
+    // 那是「待播放列表」自己的事 —— 想按收藏连播，去那个 tab 点一首即可）
+    function renderLikes() {
+        fillList(elLikesList, likedSongs);
+        if (elLikesList) elLikesList.classList.toggle('hidden', likedSongs.length === 0);
+        if (elLikesEmpty) {
+            elLikesEmpty.classList.toggle('hidden', !(loggedIn && likedSongs.length === 0));
         }
-        queue = [];
-        index = -1;   // 交给下面的 insertFirst 把刚收藏的这首放进来
+        markCurrent(window.BZSongPlayer.sid());
     }
 
-    function insertFirst(item) {
-        var i = indexOf(item.sid);
-        if (i >= 0) {                    // 已经在列表里 → 挪到最前（"我的喜欢"按最近收藏排序）
-            queue.splice(i, 1);
-            if (i < index) index -= 1;
-        }
-        queue.unshift({ sid: item.sid, title: item.title || '' });
-        if (index >= 0) {
-            index += 1;      // 前面插了一项，当前歌的位置往后挪一位
-        } else if (item.sid === window.BZSongPlayer.sid()) {
-            // 收藏的正是当前这首、它原先不在队列里 → 现在它在队首，下标要跟上。
-            // 不补这一步的话，播完自动接下一首会从队首开始，等于把这首又放一遍。
-            index = 0;
-        }
-    }
-
-    function removeItem(sid) {
-        var i = indexOf(sid);
-        if (i < 0) return;
-        queue.splice(i, 1);
-        if (i < index) {
-            index -= 1;
-        } else if (i === index) {
-            index = -1;   // 正在播的这首被取消收藏 → 它不再属于队列，播完接列表第一首
-        }
-    }
-
-    // 右栏（我的喜欢）的显隐：它**只显示"我的喜欢"自己的条目**。
-    // 队列兜底成「大家正在听」时（mode='live'），queue 里虽然有条目，但那些条目显示在
-    // 底部那块里，右栏要保持空态/登录引导 —— 否则同一批歌会在页面上出现两次。
-    // 「还没有喜欢的歌」那句只给登录用户看：未登录时右栏已经有登录引导了，不必再来一句。
-    function renderEmpty() {
-        var showOwnList = (mode === 'likes') && queue.length > 0;
-        if (elList) elList.classList.toggle('hidden', !showOwnList);
-        if (elHint) elHint.classList.toggle('hidden', !showOwnList);
-        if (elEmpty) elEmpty.classList.toggle('hidden', !(loggedIn && !showOwnList));
-    }
-
-    // 供 static/js/user.js 在收藏状态变化后调用（其它页面没有连播列表，不会调到）
+    // 供 static/js/user.js 在收藏状态变化后调用（其它页面没有这些列表，不会调到）
     function syncLiked(liked, item) {
-        if (!elList || !item || !item.sid) return;
-        if (liked) {
-            switchToLikes();     // 需要时先把这块切到「我的喜欢」
-            insertFirst(item);
-        } else {
-            removeItem(item.sid);
+        if (!item || !item.sid) return;
+        var i = -1;
+        for (var k = 0; k < likedSongs.length; k++) {
+            if (likedSongs[k].sid === item.sid) { i = k; break; }
         }
-        renderList();
-        renderEmpty();
+        if (liked) {
+            if (i >= 0) likedSongs.splice(i, 1);
+            // 最近收藏的排在前面（与后端 Favorite 的 ordering 一致）
+            likedSongs.unshift({ sid: item.sid, title: item.title || '' });
+        } else if (i >= 0) {
+            likedSongs.splice(i, 1);
+        }
+        renderLikes();
     }
 
     /* ---------- 控件 ---------- */
@@ -365,22 +343,99 @@
         });
     }
 
-    // 点列表里的一首：在队列里就跳到那一首（连播的"当前位"跟着走）；不在队列里
-    // （典型：有「我的喜欢」时点了底部「大家正在听」）就当场播它，不改队列。
-    function onItemClick(sid) {
-        var i = indexOf(sid);
-        if (i >= 0) playAt(i);
-        else playSid(sid);
+    // 把一块"可选来源列表"（猜你喜欢 / 我的喜欢）整块换成连播队列。
+    // **点中的那首排到队首**：队首恒等于"正在播放"（与进页面时的初始队列同一条规则），
+    // 列表读起来就是"第 1 条我正在听、第 2 条接着播谁"。其余条目保持原顺序。
+    function adoptList(listEl, headSid) {
+        var items = listEl.querySelectorAll('[data-play-sid]');
+        var list = Array.prototype.map.call(items, function (b) {
+            return { sid: b.getAttribute('data-play-sid'), title: b.getAttribute('title') || '' };
+        });
+        var at = -1;
+        for (var i = 0; i < list.length; i++) {
+            if (list[i].sid === headSid) { at = i; break; }
+        }
+        if (at > 0) list.unshift(list.splice(at, 1)[0]);
+        queue = list;
+        index = -1;
+        renderList();     // 「待播放列表」那一 tab 立刻跟着变
     }
 
-    // root 省略 = 绑整页（页面初始化时用）；renderList 重建右栏后只绑那个容器，
-    // 否则底部那块每次都会被重复挂一次监听，点一下会触发两次。
+    // 把一首歌插到"当前这首"的后面（全站右键菜单的「下一首播放」调它，见 song_menu.js）。
+    // 队列里若已有同一首，先摘掉再插 —— "下一首播放"不该带出重复条目。
+    // 返回 false = 没插（点的就是正在播的这首，插进去没意义）。
+    function playNext(item) {
+        if (!item || !item.sid) return false;
+        if (item.sid === window.BZSongPlayer.sid()) return false;
+        for (var i = queue.length - 1; i >= 0; i--) {
+            if (queue[i].sid === item.sid) {
+                queue.splice(i, 1);
+                if (i < index) index -= 1;
+            }
+        }
+        var at = index >= 0 ? index + 1 : 0;   // 当前这首不在队列里（-1）就放队首
+        queue.splice(at, 0, { sid: item.sid, title: item.title || '' });
+        renderList();
+        return true;
+    }
+
+    // 点列表里的一首：
+    //   已经在队列里 → 跳到那一首（连播的"当前位"跟着走）
+    //   不在队列里   → **把点中的那一块整块换成队列**（点哪块就按哪块连播），再从那首开始
+    function onItemClick(sid, el) {
+        var i = indexOf(sid);
+        if (i >= 0) {
+            playAt(i);
+            return;
+        }
+        var listEl = (el && el.closest) ? el.closest('[data-bz-list]') : null;
+        if (!listEl) {           // 不在任何来源列表里（理论上走不到）：当场播这首，不改队列
+            playSid(sid);
+            return;
+        }
+        adoptList(listEl, sid);      // 点中的这首排到队首，见 adoptList
+        i = indexOf(sid);
+        if (i >= 0) playAt(i); else playSid(sid);
+    }
+
+    // root 省略 = 绑整页（页面初始化时用）；重渲染某一块后只绑那个容器，
+    // 否则同一块每次都会被重复挂一次监听，点一下会触发两次。
     function bindList(root) {
         var items = (root || document).querySelectorAll('[data-play-sid]');
         Array.prototype.forEach.call(items, function (el) {
             el.addEventListener('click', function (e) {
                 e.preventDefault();
-                onItemClick(el.getAttribute('data-play-sid'));
+                onItemClick(el.getAttribute('data-play-sid'), el);
+            });
+        });
+    }
+
+    /* ---------- 右栏三个 tab ----------
+     * 高亮用 text-primary + 一条**内联**下边框：output.css 是编译产物、里面没有 daisyUI 的
+     * tabs/tab 类，写那些类名不会生效（见 song.html 顶部同一处说明）。
+     * 非选中 tab 也给一条透明下边框，避免切换时高度跳动。
+     */
+    function setTab(name) {
+        var tabs = document.querySelectorAll('[data-bz-tab]');
+        Array.prototype.forEach.call(tabs, function (b) {
+            var on = b.getAttribute('data-bz-tab') === name;
+            b.classList.toggle('text-primary', on);
+            b.classList.toggle('opacity-60', !on);
+            b.style.borderBottom = on ? '2px solid' : '2px solid transparent';
+            b.style.marginBottom = '-1px';
+        });
+        var panels = document.querySelectorAll('[data-bz-panel]');
+        Array.prototype.forEach.call(panels, function (p) {
+            p.classList.toggle('hidden', p.getAttribute('data-bz-panel') !== name);
+        });
+    }
+
+    function bindTabs() {
+        var tabs = document.querySelectorAll('[data-bz-tab]');
+        Array.prototype.forEach.call(tabs, function (b) {
+            b.addEventListener('click', function (e) {
+                e.preventDefault();
+                setTab(b.getAttribute('data-bz-tab'));
             });
         });
     }
@@ -441,21 +496,18 @@
         if (!document.getElementById('bz-audio') || !window.BZSongPlayer) return;
 
         queue = window.BZ_PLAYLIST || [];
+        likedSongs = window.BZ_LIKED || [];
         loop = read(LOOP_KEY, false) === true;
         loggedIn = window.BZ_CURRENT_USER === true;
 
-        // 右栏（我的喜欢）区块的引用：收藏后要改写它，见 syncLiked。
-        // 区块在播放页总是渲染（没播放直链时整块不存在，那时上面已经 return）；
-        // 未登录时没有 elHint（那句是登录引导，另有 id）。
-        elBox = document.getElementById('bz-playlist-box');
-        elList = document.getElementById('bz-playlist');
-        elTitle = document.getElementById('bz-playlist-title');
-        elManage = document.getElementById('bz-playlist-manage');
-        elHint = document.getElementById('bz-playlist-hint');
-        elEmpty = document.getElementById('bz-playlist-empty');
-        if (elBox) mode = elBox.getAttribute('data-kind') || 'likes';
+        // 右栏两块列表 + 「待播放列表」的空态/提示（收藏或队列一变就要就地重渲染）
+        elQueueList = document.getElementById('bz-playlist');
+        elQueueEmpty = document.getElementById('bz-playlist-empty');
+        elQueueHint = document.getElementById('bz-playlist-hint');
+        elLikesList = document.getElementById('bz-likes-list');
+        elLikesEmpty = document.getElementById('bz-likes-empty');
 
-        // 「大家正在听」区块：整块总是渲染（没人正在听时带 hidden），所以这里能取到
+        // 「大家正在听」区块：模块已下架，这里取不到元素（旧轮询逻辑因此自动跳过）
         elLiveBox = document.getElementById('bz-live-box');
         elLiveList = document.getElementById('bz-live-list');
         elLiveCount = document.getElementById('bz-live-count');
@@ -469,8 +521,18 @@
         markCurrent(current, false);   // 初始只标出"正在播的那首"，不主动滚动页面
         bindControls();
         fitMarquee();                  // 跑马灯：按真实宽度补足份数并定速（别的形态它自己会返回）
-        bindList();                    // 一次绑全页：右栏「我的喜欢」+ 底部「大家正在听」
-        renderEmpty();                 // 对齐右栏的初始显隐（模板已渲染，这里只是同一套规则再算一遍）
+        bindList();                    // 一次绑全页：右栏三块列表的条目
+        bindTabs();                    // 右栏三个 tab 的切换
+        setTab('rec');                 // 初始停在「猜你喜欢」（与模板渲染的初始态一致）
+        renderList();                  // 对齐「待播放列表」的初始显隐（模板已渲染，这里同一套规则再算一遍）
+        renderLikes();                 // 同上，「我的喜欢」
+        // 在别的页面右键"下一首播放"的歌：进播放页时补进队列（紧跟当前这首之后）。
+        // 倒着插 —— 每次都插在"当前这首"后面，倒序才保持用户点选的先后顺序。
+        var pending = read(PENDING_KEY, null);
+        if (pending && pending.length) {
+            write(PENDING_KEY, []);
+            for (var p = pending.length - 1; p >= 0; p--) playNext(pending[p]);
+        }
         window.addEventListener('popstate', onPopState);
 
         // 定时刷新「大家正在听」（0 = 关闭，见 PLAYED_LIVE_REFRESH_INTERVAL）
@@ -484,6 +546,9 @@
         });
     });
 
-    /* ---------- 对外接口（static/js/user.js 收藏后调它同步列表） ---------- */
-    window.BZPlaylist = { syncLiked: syncLiked };
+    /* ---------- 对外接口 ----------
+     * 供 user.js（收藏后同步「我的喜欢」）与 song_menu.js（右键菜单的「下一首播放」）调用。
+     * 其它页面没有这个对象，调用方都做了存在性判断。
+     */
+    window.BZPlaylist = { syncLiked: syncLiked, playNext: playNext };
 })();

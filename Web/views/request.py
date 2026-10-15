@@ -123,36 +123,31 @@ def song(request, sid):
     # 是因为歌手是列表、歌名可能为空，模板里写条件拼串太绕。
     artists = data['song'].get('artists') or []
     data['like_title'] = ' - '.join(p for p in ['/'.join(artists), data['song'].get('name')] if p)
-    # 连播队列（有「我的喜欢」用它，否则用「大家正在听」兜底）与「大家正在听」，都读本地库、不回源
-    now_listening = played_songs.now_listening()
-    data['now_listening'] = now_listening
-    data['playlist'] = _play_queue(user, now_listening)
+    # 右栏三块列表（都只读本地库、零回源）：
+    #   猜你喜欢 / 我的喜欢 直接展示；待播放列表 = 当前连播队列（第 1 条就是正在播的这首）
+    #   （点前两块里的歌会把队列换成那一块，见 static/js/playlist.js）
+    data['rec_songs'] = singer_library.recommend_songs()
+    data['liked_songs'] = ([{'sid': f.sid, 'title': f.title} for f in user.favorites.all()]
+                           if user is not None else [])
+    data['playlist'] = _play_queue(
+        {'sid': sid, 'title': data['like_title']}, data['liked_songs'], data['rec_songs'])
     return render(request, 'song.html', data)
 
 
-def _play_queue(user, now_listening):
-    """播放页的连播队列
+def _play_queue(current, liked_songs, rec_songs):
+    """初始连播队列（右栏「待播放列表」那个 tab）
 
-    有「我的喜欢」就用它（最近喜欢的在前）；一首都没有（含未登录、含登录了没收藏）就用
-    「大家正在听」兜底 —— 同一批数据既在底部那块里展示、也当队列用，所以没收藏的人也能连着听。
+    **第 1 条永远是当前正在播的这首** —— 这样列表里能直接看到"正在播放"（第 1 条高亮）、
+    第 2 条就是"下一首会播谁"；否则这块看起来跟正在听的歌毫无关系。
+    （playlist.js 的 playNext/上一首/下一首 都按下标算，当前这首在队首时下标正好是 0。）
 
-    返回 {kind, title, songs}，kind 决定队列在哪显示、右栏显示什么（见 song.html）：
-      kind = 'likes'  右栏渲染「我的喜欢」列表，队列就是它
-      kind = 'live'   队列是「大家正在听」（条目渲染在底部那块，右栏仍是空态/登录引导）
-      kind = 'empty'  两边都没有（没人正在听、也没有收藏），没有队列
-
-    title 恒为「我的喜欢」—— 它是**右栏那块**的标题，右栏永远是"我的喜欢"（有没有内容而已）；
-    「大家正在听」的标题写在底部那块模板里，不从这里出。
+    第 2 条往后接来源列表：有收藏用收藏，否则用「猜你喜欢」；已在队首的那首不再重复出现。
+    之后在「猜你喜欢 / 我的喜欢」里点任意一首，队列会**整块换成那一块**（点哪块就按哪块连播）。
     """
-    if user is not None:
-        liked = [{'sid': f.sid, 'title': f.title} for f in user.favorites.all()]
-        if liked:
-            return {'kind': 'likes', 'title': '我的喜欢', 'songs': liked}
-
-    songs = [{'sid': s.sid, 'title': s.title} for s in now_listening]
-    if songs:
-        return {'kind': 'live', 'title': '我的喜欢', 'songs': songs}
-    return {'kind': 'empty', 'title': '我的喜欢', 'songs': []}
+    sid = (current or {}).get('sid')
+    source = liked_songs or rec_songs
+    songs = ([current] if sid else []) + [s for s in source if s.get('sid') != sid]
+    return {'songs': songs}
 
 
 def song_info(request, sid):

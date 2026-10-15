@@ -98,6 +98,7 @@
         renderVolBtn();
         renderProgress();
         renderPageState();
+        renderMediaState();   // 顺带把播放状态同步给系统媒体面板（见 renderMediaState）
     }
 
     /* ---------- 进度持久化（断点续播用） ---------- */
@@ -215,6 +216,7 @@
 
         renderSongInfo(song);
         renderProgress();
+        updateMediaSession();   // 换歌后锁屏/通知栏的标题与封面也要跟着换
     }
 
     /* ---------- 播放控制 ---------- */
@@ -256,6 +258,31 @@
     function pause() { if (audio) audio.pause(); }
     function toggle() { if (!audio) return; if (audio.paused) play(); else pause(); }
 
+    // 跳到某个时间点（歌词行点击、媒体面板快进/快退、键盘都用它）
+    function seek(t) {
+        if (!audio || !isFinite(t) || t < 0) return;
+        try {
+            audio.currentTime = t;
+            state.curTime = t;
+            renderProgress();
+        } catch (e) { /* 忽略 */ }
+    }
+    function seekBy(delta) {
+        if (!audio || !isFinite(audio.duration)) return;
+        seek(audio.currentTime + delta);
+    }
+    // 设置音量（键盘 ↑/↓ 与音量拖动共用；音量大于 0 时自动解除静音）
+    function setVolume(v) {
+        if (!audio) return;
+        state.volume = Math.max(0, Math.min(100, Math.round(v)));
+        if (state.muted && state.volume > 0) state.muted = false;
+        audio.muted = state.muted;
+        audio.volume = state.volume / 100;
+        write(KEY.volume, state.volume);
+        write(KEY.muted, state.muted);
+        renderVolBtn();
+    }
+
     /* ---------- 拖动条（进度 / 音量通用，支持鼠标与触摸） ---------- */
     function bindDrag(bar, onRatio) {
         if (!bar) return;
@@ -279,6 +306,82 @@
         });
         bar.addEventListener('pointerup', function () { dragging = false; });
         bar.addEventListener('pointercancel', function () { dragging = false; });
+    }
+
+    /* ---------- 锁屏 / 通知栏控制（MediaSession） ----------
+     * 手机锁屏或切到后台后，系统媒体面板会显示"正在播放"的歌名/歌手/封面，并给出
+     * 播放暂停、上一首/下一首、快进快退按钮。不接这个 API，锁屏面板就是空的（体验很差）。
+     * 浏览器不支持时全部静默跳过，不影响本页任何功能。
+     */
+    function updateMediaSession() {
+        if (!('mediaSession' in navigator) || !window.MediaMetadata) return;
+        try {
+            navigator.mediaSession.metadata = new window.MediaMetadata({
+                title: data.name || '',
+                artist: data.artists || '',
+                album: window.BZ_SITE_ALT || '',
+                // artwork 必须是绝对地址；封面为空时给空数组（面板会显示默认图标）
+                artwork: data.cover ? [{ src: data.cover, sizes: '500x500' }] : []
+            });
+        } catch (e) { /* 元数据不合法（封面不是绝对地址等）时忽略 */ }
+    }
+
+    function setupMediaSession() {
+        if (!('mediaSession' in navigator)) return;
+        var ms = navigator.mediaSession;
+        // 逐个动作单独 try：浏览器只认它支持的那些，不认的会抛错，不能因此中断初始化
+        function on(action, fn) {
+            try { ms.setActionHandler(action, fn); } catch (e) { /* 该动作不支持，跳过 */ }
+        }
+        // 上一首/下一首直接点控制条那两个按钮 —— "下一首是谁"的逻辑只写在 playlist.js 一处，
+        // 在这里再实现一遍就会两处跑偏
+        function clickBtn(id) {
+            var el = document.getElementById(id);
+            if (el) el.click();
+        }
+        on('play', play);
+        on('pause', pause);
+        on('previoustrack', function () { clickBtn('bz-btn-prev'); });
+        on('nexttrack', function () { clickBtn('bz-btn-next'); });
+        on('seekbackward', function () { seekBy(-10); });
+        on('seekforward', function () { seekBy(10); });
+    }
+
+    // 把播放状态同步给系统面板（播/暂停时调用），锁屏上的按钮状态才对
+    function renderMediaState() {
+        if (!('mediaSession' in navigator)) return;
+        try { navigator.mediaSession.playbackState = state.playing ? 'playing' : 'paused'; }
+        catch (e) { /* 忽略 */ }
+    }
+
+    /* ---------- 键盘快捷键 ----------
+     * 空格 = 播放/暂停、← / → = 上一首/下一首（点控制条按钮，队列逻辑不重复实现）、
+     * ↑ / ↓ = 音量。焦点在输入框/可编辑区域里、或按了修饰键时不劫持。
+     */
+    function setupKeyboard() {
+        document.addEventListener('keydown', function (e) {
+            var t = e.target;
+            if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+            if (e.ctrlKey || e.metaKey || e.altKey) return;
+            if (e.key === ' ' || e.key === 'Spacebar') {
+                e.preventDefault();
+                toggle();
+            } else if (e.key === 'ArrowRight') {
+                e.preventDefault();
+                var next = document.getElementById('bz-btn-next');
+                if (next) next.click();
+            } else if (e.key === 'ArrowLeft') {
+                e.preventDefault();
+                var prev = document.getElementById('bz-btn-prev');
+                if (prev) prev.click();
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                setVolume(state.volume + 5);
+            } else if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                setVolume(state.volume - 5);
+            }
+        });
     }
 
     /* ---------- 初始化 ---------- */
@@ -385,13 +488,7 @@
         });
         // 音量拖动：按比例调整（音量大于 0 时自动解除静音）
         bindDrag(document.querySelector('.bz-pp-vol .jp-volume-bar'), function (r) {
-            state.volume = Math.round(r * 100);
-            if (state.muted && state.volume > 0) state.muted = false;
-            audio.muted = state.muted;
-            audio.volume = state.volume / 100;
-            write(KEY.volume, state.volume);
-            write(KEY.muted, state.muted);
-            renderVolBtn();
+            setVolume(r * 100);
         });
 
         // 恢复上次进度：同曲时点击播放从断点继续；若刷新前正在播放则自动续播
@@ -406,19 +503,18 @@
             }
         }
 
+        // 锁屏/通知栏控制与键盘快捷键（浏览器不支持时各自静默跳过）
+        updateMediaSession();
+        setupMediaSession();
+        setupKeyboard();
+
         renderAll();
     });
 
     /* ---------- 对外接口（play.js 歌词跳转 + playlist.js 连播） ---------- */
     window.BZSongPlayer = {
-        seek: function (t) {
-            if (!audio || !isFinite(t) || t < 0) return;
-            try {
-                audio.currentTime = t;
-                state.curTime = t;
-                renderProgress();
-            } catch (e) { /* 忽略 */ }
-        },
+        // 跳到某个时间点（play.js 的歌词行点击用它）
+        seek: seek,
         // 换一首歌（音频、封面、歌名、歌词一起换），换完由调用方决定要不要立即播
         load: function (song) { load(song); },
         play: play,

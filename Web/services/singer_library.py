@@ -21,6 +21,9 @@ from Web.services import pager
 PAGE_SIZE = 96
 # 首页歌手墙显示几位（源站首页给的也是 24 个）
 HOME_COUNT = 24
+# 首页歌手墙从歌手大全**前几页**里随机抽。库里没有热度字段，只能拿"源站默认顺序"当热门，
+# 越靠前越热门，所以把候选集限定在前几页（PAGE_SIZE × HOME_PAGES 位），别从两万多位里乱抽。
+HOME_PAGES = 5
 # 首页「随机点唱机」整批缓存的缓存键
 RANDOM_CACHE_KEY = 'bz_random_pick'
 # 首页歌手墙整批缓存的缓存键（与点唱机各记一份：两者换批互不影响）
@@ -40,21 +43,27 @@ def page_url(page):
 
 
 def home_singers():
-    """首页歌手墙：从全量名册里随机抽 HOME_COUNT 位
+    """首页歌手墙：从「歌手大全**前 5 页**」里随机抽 HOME_COUNT 位
 
-    库里没有"热门"这个维度（入库顺序就是源站「歌手大全」的默认顺序），所以"推荐"本来就是个
-    伪命题 —— 固定取前 24 位只会让首页永远是同一批人。改成随机抽，两万多位都有机会露面。
+    为什么限定前几页：库里没有"热度"这个维度，但**入库顺序 = 源站「歌手大全」的默认顺序**
+    （见 first_singers 的说明），越靠前越热门。之前是从两万多位里全量乱抽，冷门歌手照样
+    摆上首页；现在只在 HOME_PAGES 页（PAGE_SIZE × 5 = 480 位）里摇，既保证是"热门"那一批，
+    又不会每次都是同样 24 个人。
 
     整批缓存 RANDOM_PICK_TTL_HOURS 小时后再摇下一批，理由与 random_songs() 完全一致：
-    一是 `ORDER BY RANDOM()` 要扫全表，不该每个首页请求都跑一遍；二是只有这样才存在"一批"
-    这个概念 —— 换批由缓存过期后的第一个访客触发，不是整点。
+    一是 `ORDER BY RANDOM()` 要扫一遍候选集，不该每个首页请求都跑；二是只有这样才存在
+    "一批"这个概念 —— 换批由缓存过期后的第一个访客触发，不是整点。
     这里刻意**复用**点唱机那个时长旋钮（它是 .env 的 CACHE_TTL_HOURS_HOME，缺省落到全局
     CACHE_TTL_HOURS），不再新增配置项：首页上"多久换一批"本来就该是同一个手感。
     """
     cached = cache.get(HOME_SINGERS_CACHE_KEY)
     if cached is not None:
         return cached
-    rows = Singer.objects.order_by('?')[:HOME_COUNT]
+    # 先按入库顺序取前 HOME_PAGES 页的 id，再在这批里随机 —— 切片后不能再 order_by('?')
+    # （Django 不允许对已切片的查询集重排序），所以拆成两步。
+    hot_ids = list(
+        Singer.objects.order_by('id').values_list('id', flat=True)[:PAGE_SIZE * HOME_PAGES])
+    rows = Singer.objects.filter(id__in=hot_ids).order_by('?')[:HOME_COUNT]
     # 存 dict 而不是 Singer 实例：缓存要把值 pickle，dict 更轻，也不会因为以后加字段而失配
     singers = [{'name': s.name, 'link': s.link, 'pic': s.pic} for s in rows]
     # 空库不写缓存：否则清过表/刚迁移完的站点，首页会一直空到缓存过期
@@ -90,6 +99,32 @@ def random_songs():
     # 空库不写缓存：否则清过表/刚迁移完的站点，首页会一直空到缓存过期
     if songs:
         cache.set(RANDOM_CACHE_KEY, songs, int(settings.RANDOM_PICK_TTL_HOURS * 3600))
+    return songs
+
+
+# 播放页「猜你喜欢」（连播队列的兜底）整批缓存的缓存键、条数与存活时长（秒）
+QUEUE_CACHE_KEY = 'bz_queue_rec'
+QUEUE_COUNT = 20
+QUEUE_TTL_SECONDS = 30 * 60
+
+
+def recommend_songs(limit=QUEUE_COUNT):
+    """播放页连播队列的兜底「猜你喜欢」：从本地曲目库随机取一批
+
+    数据源是本地 SingerSong（与首页「随机点唱机」同源），一次源站都不请求。
+    **单独一份缓存**（不与首页那批共用，否则队列和首页点唱机永远是同一批歌）：
+    一是 `ORDER BY RANDOM()` 要扫全表，不该每个播放页都跑一遍；
+    二是这样才存在"一批"这个概念，换批由缓存过期后的第一个访客触发。
+    返回 [{sid, title}]，与连播队列（playlist.js）需要的形态一致。
+    """
+    cached = cache.get(QUEUE_CACHE_KEY)
+    if cached is not None:
+        return cached
+    rows = SingerSong.objects.order_by('?')[:limit]
+    songs = [{'sid': row.sid, 'title': row.title} for row in rows]
+    # 空库不写缓存：否则清过表/刚迁移完的站点，队列会一直空到缓存过期
+    if songs:
+        cache.set(QUEUE_CACHE_KEY, songs, QUEUE_TTL_SECONDS)
     return songs
 
 

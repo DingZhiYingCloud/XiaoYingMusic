@@ -22,6 +22,7 @@ import logging
 import requests
 
 from .xiaoying_api import API_BASE, APP_ID, APP_SECRET, auth_params
+from . import outbound
 
 logger = logging.getLogger(__name__)
 
@@ -43,12 +44,11 @@ def _request(path, params, method='POST'):
     params = {k: v for k, v in (params or {}).items() if v not in (None, '')}
 
     try:
+        url = f'{API_BASE}{path}'
         if method == 'GET':
-            resp = requests.get(f'{API_BASE}{path}', params=auth_params(params),
-                                timeout=TIMEOUT)
+            resp = outbound.request('get', url, params=auth_params(params), timeout=TIMEOUT)
         else:
-            resp = requests.post(f'{API_BASE}{path}', data=auth_params(params),
-                                 timeout=TIMEOUT)
+            resp = outbound.request('post', url, data=auth_params(params), timeout=TIMEOUT)
         payload = resp.json()
     except (requests.RequestException, ValueError) as e:
         logger.warning('小影用户中心请求失败 %s：%s', path, e)

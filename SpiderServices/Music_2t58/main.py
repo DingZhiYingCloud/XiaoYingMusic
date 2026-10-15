@@ -768,12 +768,15 @@ class Music2t58Spider:
         同一套程序（兜底源也是同族站点），解析规则一旦失效会同时影响它们，切了也救不了；
         而空结果在搜索页是合法的。
         """
-        # 熔断中（上游整体不可用）：直连已知不通，跳过直连、只给代理留一点时间；
-        # 平时用完整预算。**代理照试** —— 它是出口被封时唯一能出数据的线路。
+        # 熔断中（上游整体不可用）跳过直连；强制代理（见 FORCE_PROXY）时同样不走直连；
+        # 两种情况下都**照旧试代理** —— 它是出口被封时唯一能出数据的线路。预算见下。
         down = self._upstream_down()
-        deadline = time.monotonic() + (self.PROXY_ONLY_BUDGET if down else self.REQUEST_BUDGET)
+        proxy_only = self._proxy_only()      # 强制代理且拿得到节点 → 不做直连（见 FORCE_PROXY）
+        # 熔断期只给代理留一点时间；强制代理时不缩预算（直连本来就不试，预算全给代理）
+        deadline = time.monotonic() + (
+            self.PROXY_ONLY_BUDGET if (down and not proxy_only) else self.REQUEST_BUDGET)
         first_error = None
-        alive = [] if down else self._alive_bases(self.DOMAINS, self.DOMAIN_BAD_CACHE_KEY)
+        alive = [] if (down or proxy_only) else self._alive_bases(self.DOMAINS, self.DOMAIN_BAD_CACHE_KEY)
         if not alive:
             # 全在冷却里 → 下面的循环一条都不会试。直连刚失败过、没必要再撞，但**代理必须试**：
             # 代理走的是独立线路，跟我们的出口 IP 没关系（实测两个出口 IP 都被源站封死时，
@@ -829,7 +832,9 @@ class Music2t58Spider:
         抛错时优先抛第一层那个：那才是根因，兜底失败通常只是连带结果。
         """
         last_error = None
-        alive = self._alive_bases(self.FALLBACK_BASES, self.FALLBACK_BAD_CACHE_KEY)
+        # 强制代理时不试兜底源的直连（理由见 _get_html 的 proxy_only）
+        alive = [] if self._proxy_only() else self._alive_bases(
+            self.FALLBACK_BASES, self.FALLBACK_BAD_CACHE_KEY)
         if not alive:
             # 兜底源全在冷却里 → 下面循环不会跑，但仍然试一次代理（理由见 _get_html）
             html = self._retry_via_proxy(
@@ -874,36 +879,85 @@ class Music2t58Spider:
                 f'兜底源全部处于冷却中，{self.DOMAIN_COOLDOWN} 秒后自动重试：{path}')
         raise first_error or last_error
 
-    # ============ 代理线路（备用通道，配置见 PROXY_API_PATH）============
-    # 代理节点短缓存时长（秒）。51代理接口有**频率限制**（实测提示
-    # "超出套餐限制,您的套餐只能1秒提取10个"），而调用方原本**每个失败请求**都提取一次，
-    # 量一大就整片被限流拒绝 —— 结果是"线路明明可用，却每次都是空池"，白等一遍超时。
-    # 缓存一小会儿既把提取频率压回限额内，又远短于节点寿命（失效即换批，最多晚这么多秒）。
-    # 进程内缓存，各 worker 各一份。
-    PROXY_POOL_CACHE_SECONDS = float(os.getenv('MUSIC_2T58_PROXY_CACHE_SECONDS', '20'))
-    _PROXY_POOL_CACHE = None   # (过期时间戳, pool)
+    # ============ 代理线路（出站主通道，配置见 PROXY_API_PATH）============
+    # 本机出口 IP 早被源站封了：直连每次都要白等一个 connect 超时，所以默认**强制走代理**
+    # （见 FORCE_PROXY）。节点用法是**粘住一条、能用就一直用**：平台接口有频率限制
+    # （实测"每秒只能提取 10 个"），每个请求都提取必然被限流、代理等于失效；
+    # 粘住 + 失败即换既绕开限流，也符合动态代理"一条用到不能用再换"的用法。
+    #
+    # 每进程一份（_CURRENT_PROXY 是进程内变量，刻意不走 Django cache）：各 worker 互不干扰，
+    # 也不会因为全站共用一条而在平台侧形成单点。粘多久见 PROXY_NODE_TTL。
+    FORCE_PROXY = os.getenv('MUSIC_2T58_FORCE_PROXY', 'true').lower() in ('true', '1', 'yes')
+    # 一条节点粘多久（秒）：到点主动换一条，避免用到"马上要过期"的节点；失败则立刻换。
+    PROXY_NODE_TTL = float(os.getenv('MUSIC_2T58_PROXY_TTL_SECONDS', '10'))
+    # 一次回源最多换几条节点（换到第 N 条还不行就放弃，由调用方决定是否回落直连）
+    PROXY_MAX_ATTEMPTS = int(os.getenv('MUSIC_2T58_PROXY_MAX_ATTEMPTS', '3'))
+    _CURRENT_PROXY = None      # 当前粘住的节点：{'http','https','expire_at'}；None = 还没有
+    _PROXY_QUEUE = []          # 同一批里剩下的备用节点（换节点时先从这里拿，省一次提取）
+    _PROXY_FAILED_UNTIL = 0.0  # 提取失败后的冷却截止（避免平台拒绝时每次调用都去撞平台）
+    _PROXY_LOCK = threading.Lock()
 
     @classmethod
-    def _proxy_pool(cls):
-        """取一批代理节点（带短缓存，见 PROXY_POOL_CACHE_SECONDS）
+    def current_proxy(cls):
+        """当前该用的代理节点（粘住复用；到期或失效后自动重取）；取不到返回 None
 
-        调用方拿到的永远是"最近的、还没过期"的一批；提取失败（含被限流）也会缓存一小会儿，
-        避免在故障/限流期间每个请求都去撞一次接口。真正的提取见 _extract_proxy_pool。
+        返回可直接传给 requests 的 dict（{'http': ..., 'https': ...}）。
+        取不到一律返回 None，由调用方决定：强制代理时会回落直连兜底（见 _proxy_only）。
         """
         now = time.time()
-        cached = cls._PROXY_POOL_CACHE
-        if cached and cached[0] > now:
-            return cached[1]
-        pool = cls._extract_proxy_pool()
-        cls._PROXY_POOL_CACHE = (now + cls.PROXY_POOL_CACHE_SECONDS, pool)
-        return pool
+        with cls._PROXY_LOCK:
+            cur = cls._CURRENT_PROXY
+            if cur and cur['expire_at'] > now:
+                return {'http': cur['http'], 'https': cur['https']}
+            # 提取失败后的冷却期内直接返回 None（调用方会走直连），不再去撞平台 ——
+            # 否则平台拒绝时，一个请求里（_get_html / 兜底 / 播放接口）会各撞一次。
+            if now < cls._PROXY_FAILED_UNTIL:
+                return None
+            # 要换一条：先用上次那批里剩下的（省一次提取请求），没有再提取一批
+            if cls._PROXY_QUEUE:
+                node = cls._PROXY_QUEUE.pop(0)
+            else:
+                # ⚠️ 提取本身是**直连**（见 _extract_proxy_pool）——"用代理去取代理"会死循环。
+                pool = cls._extract_proxy_pool()
+                if not pool:
+                    cls._CURRENT_PROXY = None
+                    cls._PROXY_FAILED_UNTIL = now + cls.PROXY_NODE_TTL
+                    return None
+                node = pool.pop(0)
+                cls._PROXY_QUEUE = pool
+            cls._PROXY_FAILED_UNTIL = 0.0
+            cls._CURRENT_PROXY = {
+                'http': node['http'], 'https': node['https'],
+                'expire_at': now + cls.PROXY_NODE_TTL,
+            }
+            return {'http': node['http'], 'https': node['https']}
+
+    @classmethod
+    def invalidate_proxy(cls):
+        """把当前节点标记为不可用 —— 下一次 current_proxy() 会换一条
+
+        注意**不动 _PROXY_QUEUE**：同一批里剩下的节点还有机会，换节点时优先用它们，
+        只有整批都用完了才再去提取一次（平台接口有频率限制，能省就省）。
+        """
+        with cls._PROXY_LOCK:
+            cls._CURRENT_PROXY = None
+
+    def _proxy_only(self):
+        """本次回源是否"只走代理"：开了 FORCE_PROXY 且确实拿得到节点
+
+        刻意在**取不到节点时返回 False**：那样调用方会走原来的直连逻辑 ——
+        这就是"代理彻底不可用时回落直连兜底"，总比整站空白强。
+        """
+        if not self.FORCE_PROXY:
+            return False
+        return self.current_proxy() is not None
 
     @classmethod
     def _extract_proxy_pool(cls):
         """实时提取一批代理节点，返回能直接传给 requests 的 proxies 列表
 
-        取不到（平台没配签名、接口报错、返回空）一律返回空列表，由调用方静默降级 ——
-        代理是备用线路，它自己出问题不该改变原有的直连行为。
+        ⚠️ 这条请求**必须直连**，不能挂代理：节点就是从它拿的，挂上代理会死循环。
+        取不到（平台没配签名、接口报错、返回空）一律返回空列表，由调用方降级。
         """
         try:
             from Web.services.xiaoying_api import auth_params, API_BASE
@@ -935,27 +989,30 @@ class Music2t58Spider:
         return pool
 
     def _retry_via_proxy(self, call, what, deadline):
-        """直连失败后，实时取一批代理节点逐个重试；全部失败返回 None
+        """用当前那条代理节点重试；**失败即换一条**再试，最多 PROXY_MAX_ATTEMPTS 条
 
-        call(proxies) 由调用方提供：返回 None 或抛异常都算这一次没成。
-        节点现取现用、不缓存，一条不通就换下一条 —— 动态代理本来就短命，
-        逮着同一条反复重试没有意义。
+        call(proxies) 由调用方提供：
+          抛异常 = 这条节点不能用（连不上 / 超时 / 被拒 / 验证过不去）→ 换一条再试；
+          返回 None = 节点没问题、只是这次没数据（如"这首歌没有音源"）→ 不换节点。
+        这个区分很重要：把"没音源"也当成节点坏了，会把好节点白白换掉。
 
-        deadline 是本次回源的总截止时间（time.monotonic）：到点就不再换节点，直接抛
-        _SourceThrottled 快速失败。否则一批节点轮完（每个都要等超时）会把 worker
-        拖过 nginx 的 60 秒，那正是 502 的成因。
+        deadline 是本次回源的总截止时间（time.monotonic）：到点立刻放弃，
+        避免把 worker 拖过 nginx 的 60 秒（那正是 502 的成因）。
         """
         try:
-            pool = self._proxy_pool()
-            for proxies in pool:
+            for _ in range(self.PROXY_MAX_ATTEMPTS):
                 self._check_budget(deadline)
+                proxies = self.current_proxy()
+                if not proxies:
+                    return None       # 连节点都取不到：交给调用方（落实"回落直连兜底"）
                 node = proxies['http'].rsplit('@', 1)[-1]   # 只留 ip:port，账密不进日志
                 try:
                     result = call(proxies)
                 except _SourceThrottled:
                     raise
                 except Exception as e:
-                    logger.warning('%s 经代理 %s 失败：%s', what, node, e)
+                    logger.warning('%s 经代理 %s 失败（换一条）：%s', what, node, e)
+                    self.invalidate_proxy()
                     continue
                 if result is not None:
                     logger.info('%s 经代理 %s 成功', what, node)
@@ -963,9 +1020,10 @@ class Music2t58Spider:
                     self._clear_upstream_down()
                     return result
                 logger.warning('%s 经代理 %s 未取到数据', what, node)
+                return None
             return None
         finally:
-            # 无论成败都要回收本次经代理请求留下的连接池，否则会持续泄漏 FD（见下）
+            # 无论成败都要回收本次经代理请求留下的连接池，否则会持续 FD 泄漏（见下）
             self._purge_proxy_pools()
 
     def _purge_proxy_pools(self):
@@ -1679,8 +1737,8 @@ class Music2t58Spider:
             if deadline is not None:
                 self._check_budget(deadline)
             return self._retry_via_proxy(
-                lambda proxies: self._post_play_info(
-                    bases[0], song_id, song_path, session, proxies=proxies)[0],
+                lambda proxies: self._play_info_via_proxy(
+                    bases[0], song_id, song_path, session, proxies),
                 f'播放接口 {bases[0]}（{label}全在冷却，改走代理）', deadline)
         for base in alive:
             if deadline is not None:
@@ -1691,19 +1749,33 @@ class Music2t58Spider:
             # 没配出口 IP 时 _alive_source_ips() 返回 ['']（真值），照旧直连，不受影响。
             # 实测价值：刷新一次直链原来要 6~9 秒（3 秒白等的直连 + 代理），
             # 正好卡在 8 秒预算上、约 1/3 的机会被掐断；跳过之后 3~6 秒，稳稳落在预算内。
-            direct_worth_it = bool(self._alive_source_ips())
+            # 直连值不值得试：强制代理时一律不试（拿不到节点时 _proxy_only() 返回 False，
+            # 于是回落直连 —— 这就是"代理彻底不可用时兜底直连"）
+            direct_worth_it = (not self._proxy_only()) and bool(self._alive_source_ips())
             data, error = (self._post_play_info(base, song_id, song_path, session)
                            if direct_worth_it else (None, None))
             if proxy_fallback and (error is not None or not direct_worth_it):
                 data = self._retry_via_proxy(
-                    lambda proxies: self._post_play_info(
-                        base, song_id, song_path, session, proxies=proxies)[0],
+                    lambda proxies: self._play_info_via_proxy(
+                        base, song_id, song_path, session, proxies),
                     f'播放接口 {base}', deadline)
             if data is not None:
                 return data
             if direct_worth_it and error is not None:
                 self._mark_base_bad(base, cache_key, label, error)
         return None
+
+    def _play_info_via_proxy(self, base, song_id, song_path, session, proxies):
+        """经代理取播放信息，供 _retry_via_proxy 调用
+
+        与"直接把 _post_play_info(...)[0] 丢给 _retry_via_proxy"的区别在于**错误要抛出去**：
+        网络层失败 = 这条节点不能用 → 让调用方换一条；而"接口通了但这首没音源"返回 None，
+        不算节点的问题（否则会把好节点白白换掉）。
+        """
+        data, error = self._post_play_info(base, song_id, song_path, session, proxies=proxies)
+        if error is not None:
+            raise error
+        return data
 
     def _post_play_info(self, base, song_id, song_path, session, proxies=None):
         """请求一次 play.php，返回 (响应数据, 异常)
@@ -1737,7 +1809,9 @@ class Music2t58Spider:
         if not cid:
             return ''
         try:
-            resp = self.session.get(self.LRC_API, params={'cid': cid}, timeout=10)
+            # 歌词接口是第三方独立域名，同样按"出站走代理"策略：强制代理时挂上当前节点
+            resp = self.session.get(self.LRC_API, params={'cid': cid}, timeout=10,
+                                    proxies=self.current_proxy() if self.FORCE_PROXY else None)
             data = resp.json()
             return data.get('lrc', '')
         except (requests.RequestException, ValueError):

@@ -73,6 +73,7 @@ TEMPLATES = [
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
                 'Web.services.friend_links.friend_links', # 小影 API 友情链接（后端拉取+1小时缓存，渲染进HTML供搜索引擎可见）
+                'Web.services.contacts.site_contacts', # 小影 API 开发者联系方式（后端拉取+1小时缓存，页脚「联系我们」弹窗用）
                 'Web.services.site_info.site_info', # 站点名称/联系方式/统计ID（取自 .env，二开改名只改 .env）
                 'Web.services.hot_search.hot_keywords', # 热门搜索榜（header 搜索框下拉用，带 10 分钟缓存）
                 'Web.services.user_session.current_user_context', # 当前登录用户（header 的登录入口 / 昵称）
