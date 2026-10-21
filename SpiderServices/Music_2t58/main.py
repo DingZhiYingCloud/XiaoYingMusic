@@ -1411,29 +1411,54 @@ class Music2t58Spider:
     # MV 直链的缓存时长（秒）：kuwo 直链带 token 会过期，缓存太久会拿到 403；
     # 不缓存又会让播放器每拖一次进度就回源换一次地址。5 分钟是实测的折中。
     MV_URL_TTL = 300
+    # 「MV 页说有、但播放地址解析不出来」的结果只缓存这么久（秒）。
+    # 源站有一部分 MV 的 vplay 只回 302 + 空 Location（实测 d3dta3Njbg / d3hjbm5t），
+    # 那种歌点开就是黑屏；但源站偶尔会"暂时给不出地址"，所以别把它当"没有 MV"缓存两小时。
+    MV_UNAVAILABLE_TTL = 600
+    # 判定路径（fetch_mv）解析直链的时间预算（秒）：只用来"确认能不能播"，
+    # 拿不到就算了，不该让这个异步查询等满 REQUEST_BUDGET。
+    MV_CHECK_BUDGET = 10
 
     def fetch_mv(self, sid):
-        """查这首歌有没有 MV
+        """查这首歌有没有 MV，**并且确认现在真的能播**
 
-        返回 {'has_mv': bool, 'qualities': ['1080', ...], 'poster': url}。
+        返回 {'has_mv': bool, 'qualities': ['1080', ...], 'poster': url, 'stream': url}。
         这是"页面上要不要出现切换按钮"的唯一依据，所以**任何异常都收敛成 has_mv=False**
         （宁可不显示按钮，也不能让播放页因为查 MV 失败而出错）。
 
-        缓存口径：只有**拿到并认出 MV 页**才写缓存（有/没有都算确定结果，都缓存）；
-        抓取失败（源站全在冷却、验证过不去）不写，下次访问还能再试。
+        为什么还要解析一次直链：MV 页的 quality 列表只说明"源站认为这首有 MV"，
+        实测有歌列表非空、vplay 却只回 302 + 空 Location（拿不到地址，点开必然黑屏）。
+        只按列表判断会让用户点到一个播不了的按钮，所以顺手解析一次，解析不出来就算没有。
+        代价是首次判定多一次请求（结果跟着缓存走，之后都是本地命中）。
+
+        缓存口径：页面明确说没有 MV → 长缓存；有列表但地址解析不出来 → 短缓存
+        （见 MV_UNAVAILABLE_TTL，源站恢复后能自己好）；抓取失败不缓存。
+
+        键名带版本号（mv2 而不是 mv）：上一版只按 quality 列表判定，把"有列表但播不了"
+        的歌缓存成了 has_mv=True。换键名让那些旧结果直接失效，不必手工清缓存。
         """
-        key = self._cache_key('mv', sid)
+        key = self._cache_key('mv2', sid)
         cached = cache.get(key)
         if cached is not None:
             return cached
+        empty = {'has_mv': False, 'qualities': [], 'poster': '', 'stream': ''}
         try:
             info = self._do_fetch_mv(sid)
         except Exception as e:
             logger.warning('查 MV 失败 %s：%s', sid, e)
-            return {'has_mv': False, 'qualities': [], 'poster': ''}
+            return empty
         if info is None:
-            return {'has_mv': False, 'qualities': [], 'poster': ''}
-        cache.set(key, info, self._ttl_for('song'))
+            return empty
+
+        info['stream'] = ''
+        if info['has_mv']:
+            # 判定路径给个小预算：这是页面加载后的异步查询，不该像刷新播放直链那样等满 25 秒
+            info['stream'] = self._resolve_stream_url(
+                sid, info['qualities'], budget=self.MV_CHECK_BUDGET) or ''
+            info['has_mv'] = bool(info['stream'])
+        # 有清晰度列表 = 页面确实有这首 MV，只是这次没拿到地址 → 短缓存等它恢复
+        ttl = (self.MV_UNAVAILABLE_TTL if info['qualities'] else self._ttl_for('song'))
+        cache.set(key, info, ttl)
         return info
 
     def _do_fetch_mv(self, sid):
@@ -1460,16 +1485,27 @@ class Music2t58Spider:
     def resolve_mv_stream(self, sid, quality=''):
         """把 MV 解析成可直接播放的 https 直链；拿不到返回空串
 
+        播放端点每次请求都调它（见 Web/views/request.py 的 mv_stream），所以这里
+        只负责"取地址"，判定逻辑在 fetch_mv；直链本身短缓存 MV_URL_TTL 秒。
+
         为什么返回 https：本站是 https，页面上放 http 的视频会被浏览器按混合内容
         静默拦掉（跟封面图那个坑一样，见 _force_https）。实测 kuwo 同一路径换 https 可播。
 
         清晰度按调用方要求取，没要求或那档不存在时优先 720（清晰度与体积的折中）。
-        解析结果短缓存 MV_URL_TTL 秒，避免播放器每次拖动进度都回源一次。
         """
         info = self.fetch_mv(sid)
         qualities = info.get('qualities') or []
         if not qualities:
             return ''
+        return self._resolve_stream_url(sid, qualities, quality)
+
+    def _resolve_stream_url(self, sid, qualities, quality='', budget=None):
+        """按清晰度列表解析一次直链并短缓存；拿不到返回空串
+
+        qualities 由 _do_fetch_mv 给出（源站页面里的清晰度顺序），不在这里重复抓页面：
+        判定（fetch_mv）与播放（resolve_mv_stream）共用同一份列表。
+        budget 只给判定路径收小（见 MV_CHECK_BUDGET），播放路径用 REQUEST_BUDGET。
+        """
         q = str(quality or '')
         if q not in qualities:
             q = '720' if '720' in qualities else qualities[0]
@@ -1479,7 +1515,7 @@ class Music2t58Spider:
         if cached:
             return cached
 
-        deadline = time.monotonic() + self.REQUEST_BUDGET
+        deadline = time.monotonic() + (budget or self.REQUEST_BUDGET)
         target = f'plug/down.php?ac=vplay&id={self._to_fallback_id(sid)}&q={q}'
         # 兜底源全在冷却时仍然试一条（走代理）—— 理由同 _get_html：冷却只说明直连不行，
         # 代理是独立线路，不试就彻底没数据了。
