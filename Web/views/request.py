@@ -181,6 +181,56 @@ def song_info(request, sid):
     })
 
 
+def song_mv(request, sid):
+    """这首歌有没有 MV（JSON）—— 播放页歌词区「歌词 / 观看MV」切换靠它
+
+    刻意**不放在播放页的渲染链路里**：查 MV 要额外回源一次，放在首屏会让每个播放页
+    都慢一拍。页面照常渲染，前端在 DOM 就绪后异步问一次，有 MV 才把切换按钮显示出来
+    （没有就完全不出现）。
+
+    结果在爬虫层缓存（与歌曲页同一个 TTL），所以一首歌只有第一次问会回源。
+    出错一律回 has_mv=False，前端静默不显示按钮。
+    """
+    if not SID_PATTERN.match(sid):
+        return JsonResponse({'ok': False, 'has_mv': False}, status=400)
+    try:
+        info = Music2t58Spider().fetch_mv(sid)
+    except Exception:
+        return JsonResponse({'ok': True, 'has_mv': False})
+    has_mv = bool(info.get('has_mv'))
+    return JsonResponse({
+        'ok': True,
+        'has_mv': has_mv,
+        'poster': info.get('poster') or '',
+        # 播放地址固定走本站代理：源站给的是 http 直链，https 页面直接引用会被
+        # 浏览器按混合内容拦掉（见 Web/views/request.py 的 mv_stream）
+        'stream': f'/mv/{sid}.mp4' if has_mv else '',
+    })
+
+
+def mv_stream(request, sid):
+    """MV 播放地址：解析出源站直链后 302 过去
+
+    为什么是 302 而不是后端转发流：直链本身换 https 后浏览器能直连（实测 206、
+    Range 正常），让 uwsgi 去扛几十 MB 的视频流没有意义 —— 一个 MV 就能占满 worker。
+    每次请求都重新解析（直链带 token 会过期），解析结果在爬虫层缓存几分钟。
+    """
+    if not SID_PATTERN.match(sid):
+        return HttpResponse('参数不合法', status=400)
+    url = ''
+    try:
+        url = Music2t58Spider().resolve_mv_stream(sid, request.GET.get('q', ''))
+    except Exception:
+        url = ''
+    if not url:
+        return HttpResponse('MV 暂时无法播放，请稍后再试', status=502)
+    response = HttpResponse(status=302)
+    response['Location'] = url
+    # 直链会过期，别让浏览器/中间层把这次跳转缓存住
+    response['Cache-Control'] = 'no-store'
+    return response
+
+
 def live_now(request):
     """「大家正在听」的当前内容（JSON）
 

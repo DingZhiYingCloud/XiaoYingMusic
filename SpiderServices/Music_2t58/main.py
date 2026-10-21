@@ -1395,6 +1395,171 @@ class Music2t58Spider:
         """
         return self._fetch_play_info(sid, budget=budget)['play_url']
 
+    # ============ MV（源站「MV视频」页）============
+    # 源站给同一首歌配了一个 MV 视频页：
+    #     第一层   /video/<sid>.html
+    #     兜底源   /v/<hex(sid)>.html
+    # 两版页面是同一套程序，结构完全一致：页内 DPlayer 的 video.quality 数组就是可用清晰度，
+    # **没有 MV 时这个数组是空的**（quality:[]）—— 这就是"这首歌有没有 MV"的判定依据，
+    # 不需要额外请求、也不需要第三方搜索。
+    #
+    # 播放地址是 /plug/down.php?ac=vplay&id=…&q=…，302 到 kuwo CDN 的 mp4。
+    # ⚠️ 播放直链固定走兜底源：实测第一层自己的 vplay 只回 302 + 空 Location
+    # （1080/720/480 都试过），同一时刻兜底源正常给出 kuwo 直链。两站的 id 是同一首的
+    # 两种编码（见 _to_fallback_id），所以换源不影响放的是哪一首。
+    #
+    # MV 直链的缓存时长（秒）：kuwo 直链带 token 会过期，缓存太久会拿到 403；
+    # 不缓存又会让播放器每拖一次进度就回源换一次地址。5 分钟是实测的折中。
+    MV_URL_TTL = 300
+
+    def fetch_mv(self, sid):
+        """查这首歌有没有 MV
+
+        返回 {'has_mv': bool, 'qualities': ['1080', ...], 'poster': url}。
+        这是"页面上要不要出现切换按钮"的唯一依据，所以**任何异常都收敛成 has_mv=False**
+        （宁可不显示按钮，也不能让播放页因为查 MV 失败而出错）。
+
+        缓存口径：只有**拿到并认出 MV 页**才写缓存（有/没有都算确定结果，都缓存）；
+        抓取失败（源站全在冷却、验证过不去）不写，下次访问还能再试。
+        """
+        key = self._cache_key('mv', sid)
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            info = self._do_fetch_mv(sid)
+        except Exception as e:
+            logger.warning('查 MV 失败 %s：%s', sid, e)
+            return {'has_mv': False, 'qualities': [], 'poster': ''}
+        if info is None:
+            return {'has_mv': False, 'qualities': [], 'poster': ''}
+        cache.set(key, info, self._ttl_for('song'))
+        return info
+
+    def _do_fetch_mv(self, sid):
+        """解析 MV 页；抓不到页面、或页面不是那个结构（改版/验证页）时返回 None"""
+        html = self._get_html(
+            f'video/{sid}.html',
+            fallback_path=f'v/{self._to_fallback_id(sid)}.html')
+        # 认页面：两站都用 DPlayer。认不出来就别下结论 —— 把验证页/改版页当成
+        # "没有 MV" 会让整批歌永久少一个按钮，那是更难的错误。
+        if 'dplayer' not in html.lower():
+            return None
+        block = re.search(r'quality\s*:\s*\[(.*?)\]', html, re.S)
+        # 只取清晰度数字，不存完整地址：地址里的 id 是各站自己的写法（第一层是 sid、
+        # 兜底源是 hex），存下来换源就会指错，播放时按当前源重新拼（见 resolve_mv_stream）
+        found = re.findall(r"ac=vplay[^'\"]*?q=(\d+)", block.group(1)) if block else []
+        qualities = list(dict.fromkeys(found))     # 去重且保持源站给的顺序
+        pic = re.search(r'pic\s*:\s*"([^"]+)"', html)
+        return {
+            'has_mv': bool(qualities),
+            'qualities': qualities,
+            'poster': self._force_https(pic.group(1)) if pic else '',
+        }
+
+    def resolve_mv_stream(self, sid, quality=''):
+        """把 MV 解析成可直接播放的 https 直链；拿不到返回空串
+
+        为什么返回 https：本站是 https，页面上放 http 的视频会被浏览器按混合内容
+        静默拦掉（跟封面图那个坑一样，见 _force_https）。实测 kuwo 同一路径换 https 可播。
+
+        清晰度按调用方要求取，没要求或那档不存在时优先 720（清晰度与体积的折中）。
+        解析结果短缓存 MV_URL_TTL 秒，避免播放器每次拖动进度都回源一次。
+        """
+        info = self.fetch_mv(sid)
+        qualities = info.get('qualities') or []
+        if not qualities:
+            return ''
+        q = str(quality or '')
+        if q not in qualities:
+            q = '720' if '720' in qualities else qualities[0]
+
+        key = self._cache_key('mv_url', sid, q)
+        cached = cache.get(key)
+        if cached:
+            return cached
+
+        deadline = time.monotonic() + self.REQUEST_BUDGET
+        target = f'plug/down.php?ac=vplay&id={self._to_fallback_id(sid)}&q={q}'
+        # 兜底源全在冷却时仍然试一条（走代理）—— 理由同 _get_html：冷却只说明直连不行，
+        # 代理是独立线路，不试就彻底没数据了。
+        bases = self._alive_bases(self.FALLBACK_BASES, self.FALLBACK_BAD_CACHE_KEY)
+        proxy_only = self._proxy_only()
+        if not bases:
+            bases = self.FALLBACK_BASES[:1]
+            proxy_only = True
+
+        last_error = None
+        for base in bases:
+            url = f'{base}{target}'
+            if not proxy_only:
+                try:
+                    self._check_budget(deadline)
+                    loc = self._fetch_mv_redirect_retry(url, sid)
+                except _SourceThrottled:
+                    raise
+                except Exception as e:
+                    last_error = e
+                    loc = ''
+                if loc:
+                    self._clear_cooldown(self.FALLBACK_BAD_CACHE_KEY)
+                    cache.set(key, loc, self.MV_URL_TTL)
+                    return loc
+            loc = self._retry_via_proxy(
+                lambda proxies: self._fetch_mv_redirect_retry(url, sid, proxies),
+                f'MV 直链 {url}', deadline)
+            if loc:
+                cache.set(key, loc, self.MV_URL_TTL)
+                return loc
+        if last_error is not None:
+            logger.warning('MV 直链解析失败 %s q=%s：%s', sid, q, last_error)
+        return ''
+
+    def _fetch_mv_redirect(self, url, proxies=None):
+        """请求 vplay 接口，返回它 302 指向的直链（统一升级成 https）
+
+        Location 为空也算失败：那表示源站那边的视频地址没解析出来（实测部分 MV 会这样），
+        重试/换节点都一样，所以抛出去让调用方记日志、页面提示"暂时看不了"。
+        """
+        self._throttle()
+        resp = self.fallback_session.get(
+            url, proxies=proxies, timeout=self._timeout_for(proxies), allow_redirects=False)
+        if resp.status_code not in (301, 302, 303, 307, 308):
+            raise RuntimeError(f'MV 播放接口返回 {resp.status_code}')
+        loc = (resp.headers.get('Location') or '').strip()
+        if not loc:
+            raise RuntimeError('MV 播放接口没有给出直链')
+        return self._force_https(loc)
+
+    def _fetch_mv_redirect_retry(self, url, sid, proxies=None):
+        """请求 vplay；空 Location 时补一次人机验证再试一次
+
+        为什么要补验证：vplay 要求会话已通过人机验证。MV 结果命中缓存时，本进程可能
+        还没抓过任何页面（缓存与 cookie 跨进程共享，但"已验证"这个状态是绑在会话上的），
+        直接请求只会拿到 302 + 空 Location —— 看起来像"这个 MV 没地址"，其实只是没验过。
+        """
+        try:
+            return self._fetch_mv_redirect(url, proxies)
+        except Exception as e:
+            if '没有给出直链' not in str(e):
+                raise
+            self._verify_fallback_session(sid, proxies)
+            return self._fetch_mv_redirect(url, proxies)
+
+    def _verify_fallback_session(self, sid, proxies=None):
+        """在兜底源上过一次人机验证，并把验好的 PHPSESSID 持久化给其它 worker
+
+        抓一次 MV 页即可 —— _fetch_html 内部会自动过验证（见 _pass_verification）。
+        """
+        try:
+            self._fetch_html(
+                f'{self.FALLBACK_BASES[0]}v/{self._to_fallback_id(sid)}.html',
+                session=self.fallback_session, proxies=proxies)
+        except Exception as e:
+            logger.warning('兜底源人机验证失败（MV）：%s', e)
+            return
+        self._save_cookies('fallback', self.fallback_session)
+
     def _do_fetch_search(self, keyword, page):
         """抓取搜索结果页：结果列表 / 分页 / 是否被屏蔽（不带缓存）
 

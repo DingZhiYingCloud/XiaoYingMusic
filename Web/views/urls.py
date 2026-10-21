@@ -33,6 +33,12 @@ urlpatterns = [
     # 播放页连播时"原地换歌"用：按 sid 取这首歌的播放信息（JSON）。同样不带 .html。
     # 不要求登录 —— 谁都能点开播放页切歌。
     path('api/song/<sid>', request.song_info, name='song_info'),
+    # 这首歌有没有 MV（JSON）：播放页歌词区的「歌词 / 观看MV」切换按钮靠它决定显不显示。
+    # 不放在首屏渲染里，前端异步问（见 static/js/song_mv.js）。
+    path('api/mv/<sid>', request.song_mv, name='song_mv'),
+    # MV 播放地址：解析出源站直链后 302 过去（直链换 https 后浏览器可直连）。
+    # 用 .mp4 后缀是为了让浏览器/播放器把它当媒体地址，而不是页面。
+    path('mv/<sid>.mp4', request.mv_stream, name='mv_stream'),
 
     # ---- 用户账号与收藏（视图见 Web/views/users.py）----
     # 页面照旧带 .html，接口不带后缀；接口类只有"发验证码"和"切换喜欢"两个，

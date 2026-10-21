@@ -27,6 +27,7 @@
       .bz-pp-vol 内 .jp-volume-bar + .jp-volume-bar-value
       .bz-pp-time 内 .jp-current-time + .jp-duration
       #mcover + .djpic .state span；#play_geci / #lrc_list / #lrc_nofound
+      #bz-mv-switch / #bz-mv-box / #bz-mv-video / #bz-mv-tip（歌词 / 观看MV 切换，见 song_mv.js）
 
     本区块有两种互斥形态，由 play_url 决定：
       有直链 → 控制条 + 歌词 + <audio>（下述钩子全部存在）
@@ -145,9 +146,27 @@
 
                 {# 左：歌词（高度给足，桌面与移动都方便看） #}
                 <div class="min-w-0">
-                    <h2 class="mb-3 flex items-center gap-2 text-sm font-semibold opacity-70">
-                        <i class="fa fa-align-left text-primary"></i>歌词
-                    </h2>
+                    <div class="mb-3 flex items-center justify-between gap-3">
+                        <h2 class="flex items-center gap-2 text-sm font-semibold opacity-70">
+                            <i class="fa fa-align-left text-primary"></i>歌词
+                        </h2>
+                        {% comment %}歌词 / 观看MV 切换：只在**源站确实有 MV** 时才出现。
+                        初始 display:none，由 song_mv.js 异步查 /api/mv/<sid> 后再决定是否显示
+                        （后端查不到或没有 MV 时永远不显示，不给用户点空按钮）。
+                        外框用 display 控制、内层 flex 排两个按钮，避免 hidden 与 flex 抢 display。
+                        ⚠️ output.css 是编译产物，这里只用模板里已出现过的类名 + 内联样式。
+                        {% endcomment %}
+                        <div id="bz-mv-switch" style="display:none">
+                            <div class="flex items-center gap-1">
+                                <button type="button" data-bz-mv-tab="lrc"
+                                    class="rounded-field px-2 py-1.5 text-xs font-semibold text-primary"
+                                    style="cursor:pointer;background:color-mix(in oklab,var(--color-primary) 12%,transparent)">歌词</button>
+                                <button type="button" data-bz-mv-tab="mv"
+                                    class="rounded-field px-2 py-1.5 text-xs opacity-60"
+                                    style="cursor:pointer">观看MV</button>
+                            </div>
+                        </div>
+                    </div>
                     <div id="play_geci"
                         class="h-72 overflow-y-auto scroll-smooth px-2 [&_li]:cursor-pointer [&_li]:py-1.5 [&_li]:text-sm [&_li]:leading-6 [&_li]:text-base-content/55 [&_li.hover]:font-semibold [&_li.hover]:text-primary">
                         <ul id="lrc_list" class="space-y-0.5 text-center"></ul>
@@ -156,6 +175,16 @@
                     play.js 会把歌词区与这里互相切换）。{% endcomment %}
                     <div id="lrc_nofound" class="hidden py-28 text-center text-sm opacity-50">
                         暂无歌词，静静欣赏旋律吧
+                    </div>
+                    {% comment %}MV 播放区：与歌词区同高（h-72 = 18rem），切换时不跳版。
+                    高度写死而不按 16:9 自适应：竖屏 MV 与横屏 MV 混在一起，固定高度最稳。
+                    poster 由 song_mv.js 填（源站的 MV 截图），加载失败时提示一句。{% endcomment %}
+                    <div id="bz-mv-box" class="hidden">
+                        <video id="bz-mv-video" controls playsinline preload="none"
+                            style="width:100%;height:18rem;border-radius:.75rem;background:#000;object-fit:contain"></video>
+                        <p id="bz-mv-tip" class="hidden pt-2 text-center text-xs opacity-50">
+                            MV 暂时无法播放，稍后再试试
+                        </p>
                     </div>
                 </div>
 
@@ -325,6 +354,8 @@
 <script src="/static/js/play.js?v=v9"></script>
 <script src="/static/js/song_player.js?v=v9"></script>
 <script src="/static/js/playlist.js?v=v16"></script>
+{# 歌词 / 观看MV 切换：只在源站确实有 MV 时才出现切换按钮（异步查 /api/mv/<sid>） #}
+<script src="/static/js/song_mv.js?v=v1"></script>
 {# 右栏三块列表的数据交给 playlist.js；json_script 会做安全转义，别手工拼 JSON #}
 {{ playlist.songs|json_script:"bz-playlist-data" }}
 {{ liked_songs|json_script:"bz-likes-data" }}
