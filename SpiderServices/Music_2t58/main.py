@@ -132,6 +132,17 @@ class _SourceThrottled(Exception):
     """
 
 
+class _MvNoStream(Exception):
+    """源站的 MV 播放接口明确回了 302，但 Location 是空的
+
+    这不是网络故障，而是"源站自己也没有这首歌的视频地址"：实测相当一部分 MV 页
+    标了清晰度（1080/720/480/420），vplay 对每一档都只回空跳转，换节点、加 Referer、
+    重新过人机验证都一样。所以它与"这次没连上"必须分开处理：
+      · 明确没有地址   → 判定为"没有 MV"，不显示切换按钮；
+      · 网络/代理失败 → 判断不了，仍按"有 MV"处理，别把功能无辜藏掉。
+    """
+
+
 class _RateLimiter:
     """进程内令牌桶：每秒放 qps 个令牌，领不到就等，等不过 max_wait 就抛 _SourceThrottled
 
@@ -1453,9 +1464,18 @@ class Music2t58Spider:
         info['stream'] = ''
         if info['has_mv']:
             # 判定路径给个小预算：这是页面加载后的异步查询，不该像刷新播放直链那样等满 25 秒
-            info['stream'] = self._resolve_stream_url(
-                sid, info['qualities'], budget=self.MV_CHECK_BUDGET) or ''
-            info['has_mv'] = bool(info['stream'])
+            try:
+                info['stream'] = self._resolve_stream_url(
+                    sid, info['qualities'], budget=self.MV_CHECK_BUDGET) or ''
+            except _MvNoStream:
+                # 源站明确没有地址 → 确实播不了，按钮不显示
+                info['has_mv'] = False
+            except Exception as e:
+                # 网络/代理失败 → 判断不了。保留 has_mv=True：宁可让用户偶尔点到
+                # "MV 暂时无法播放"，也别因为一次网络抖动把功能整体藏掉。
+                logger.info('MV 能否播放判断失败 %s（先按有 MV 处理）：%s', sid, e)
+            else:
+                info['has_mv'] = bool(info['stream'])
         # 有清晰度列表 = 页面确实有这首 MV，只是这次没拿到地址 → 短缓存等它恢复
         ttl = (self.MV_UNAVAILABLE_TTL if info['qualities'] else self._ttl_for('song'))
         cache.set(key, info, ttl)
@@ -1497,7 +1517,10 @@ class Music2t58Spider:
         qualities = info.get('qualities') or []
         if not qualities:
             return ''
-        return self._resolve_stream_url(sid, qualities, quality)
+        try:
+            return self._resolve_stream_url(sid, qualities, quality)
+        except _MvNoStream:
+            return ''
 
     def _resolve_stream_url(self, sid, qualities, quality='', budget=None):
         """按清晰度列表解析一次直链并短缓存；拿不到返回空串
@@ -1526,12 +1549,24 @@ class Music2t58Spider:
             proxy_only = True
 
         last_error = None
+        # 只要有**任意一条线路**拿到"302 但没地址"，就说明源站本身没有这个视频，
+        # 与"这次没连上"是两件事（见 _MvNoStream）。用闭包标记，因为 _retry_via_proxy
+        # 会把异常吞掉自己换节点，外面看不到。
+        state = {'no_stream': False}
+
+        def attempt(proxies=None):
+            try:
+                return self._fetch_mv_redirect_retry(url, sid, proxies)
+            except _MvNoStream:
+                state['no_stream'] = True
+                raise
+
         for base in bases:
             url = f'{base}{target}'
             if not proxy_only:
                 try:
                     self._check_budget(deadline)
-                    loc = self._fetch_mv_redirect_retry(url, sid)
+                    loc = attempt()
                 except _SourceThrottled:
                     raise
                 except Exception as e:
@@ -1542,11 +1577,13 @@ class Music2t58Spider:
                     cache.set(key, loc, self.MV_URL_TTL)
                     return loc
             loc = self._retry_via_proxy(
-                lambda proxies: self._fetch_mv_redirect_retry(url, sid, proxies),
-                f'MV 直链 {url}', deadline)
+                lambda proxies: attempt(proxies), f'MV 直链 {url}', deadline)
             if loc:
                 cache.set(key, loc, self.MV_URL_TTL)
                 return loc
+        if state['no_stream']:
+            logger.warning('源站没有给出 MV 播放地址 %s q=%s（明确空跳转）', sid, q)
+            raise _MvNoStream(f'源站没有给出 {sid} 的播放地址')
         if last_error is not None:
             logger.warning('MV 直链解析失败 %s q=%s：%s', sid, q, last_error)
         return ''
@@ -1554,8 +1591,8 @@ class Music2t58Spider:
     def _fetch_mv_redirect(self, url, proxies=None):
         """请求 vplay 接口，返回它 302 指向的直链（统一升级成 https）
 
-        Location 为空也算失败：那表示源站那边的视频地址没解析出来（实测部分 MV 会这样），
-        重试/换节点都一样，所以抛出去让调用方记日志、页面提示"暂时看不了"。
+        Location 为空时抛 _MvNoStream（源站自己没这个视频），与网络故障分开，
+        理由见 _MvNoStream 的说明。
         """
         self._throttle()
         resp = self.fallback_session.get(
@@ -1564,7 +1601,7 @@ class Music2t58Spider:
             raise RuntimeError(f'MV 播放接口返回 {resp.status_code}')
         loc = (resp.headers.get('Location') or '').strip()
         if not loc:
-            raise RuntimeError('MV 播放接口没有给出直链')
+            raise _MvNoStream('MV 播放接口没有给出直链')
         return self._force_https(loc)
 
     def _fetch_mv_redirect_retry(self, url, sid, proxies=None):
@@ -1573,12 +1610,15 @@ class Music2t58Spider:
         为什么要补验证：vplay 要求会话已通过人机验证。MV 结果命中缓存时，本进程可能
         还没抓过任何页面（缓存与 cookie 跨进程共享，但"已验证"这个状态是绑在会话上的），
         直接请求只会拿到 302 + 空 Location —— 看起来像"这个 MV 没地址"，其实只是没验过。
+        所以空跳转**先验一次再重试**，两次都空才算"源站确实没有"。
         """
         try:
             return self._fetch_mv_redirect(url, proxies)
-        except Exception as e:
-            if '没有给出直链' not in str(e):
+        except _MvNoStream:
+            # 每实例最多补验一次（一个请求里可能换好几条线路，别每次都去抓一遍页面）
+            if getattr(self, '_mv_verified', False):
                 raise
+            self._mv_verified = True
             self._verify_fallback_session(sid, proxies)
             return self._fetch_mv_redirect(url, proxies)
 
