@@ -10,6 +10,7 @@ from django.http import (HttpResponse, HttpResponseBadRequest, JsonResponse,
 from django.core.cache import cache
 from django.template.loader import render_to_string
 from django.utils import timezone
+from django.views.decorators.cache import never_cache
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
@@ -181,12 +182,17 @@ def song_info(request, sid):
     })
 
 
+@never_cache
 def song_mv(request, sid):
     """这首歌有没有 MV（JSON）—— 播放页歌词区「歌词 / 观看MV」切换靠它
 
     刻意**不放在播放页的渲染链路里**：查 MV 要额外回源一次，放在首屏会让每个播放页
     都慢一拍。页面照常渲染，前端在 DOM 就绪后异步问一次，有 MV 才把切换按钮显示出来
     （没有就完全不出现）。
+
+    **禁止浏览器缓存**（@never_cache）：这个结果会随源站状态变化，而且改过判定口径。
+    一旦浏览器把某一次的 has_mv=false 存下来，后端后来修好了页面上也永远看不到按钮
+    —— 排查起来像是"功能没生效"。真正的缓存交给后端（见 fetch_mv）。
 
     结果在爬虫层缓存（与歌曲页同一个 TTL），所以一首歌只有第一次问会回源。
     **`has_mv` 的含义是"现在真的能播"**，不只是"源站说这首有 MV"：源站有一部分 MV
