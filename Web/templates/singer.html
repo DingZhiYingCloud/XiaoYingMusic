@@ -6,7 +6,37 @@
 {% block og_type %}profile{% endblock %}
 {% block og_title %}{{ singer.name }}全部歌曲 - {{ singer.name }}免费在线听 - {{ SITE_NAME_ALT }}{% endblock %}
 {% block og_description %}{{ SITE_BRAND }}提供{{ singer.name }}全部歌曲免费在线听,包含最新歌曲与热门歌曲,免登录即可在线播放完整歌曲,支持歌词同步滚动。{% endblock %}
-{% block robots %}{% if singer.name %}index, follow{% else %}noindex, follow{% endif %}{% endblock %}
+{% block robots %}{% if singer.name %}index, follow, max-image-preview:large{% else %}noindex, follow{% endif %}{% endblock %}
+
+{% block head %}
+{% comment %}
+结构化数据：MusicGroup（告诉搜索这是位歌手、头像是什么）+ 面包屑。
+头像只在是绝对地址时才写 —— 相对路径在结构化数据里无效。
+{% endcomment %}
+{% if singer.name %}
+<script type="application/ld+json">
+{
+    "@context": "https://schema.org",
+    "@graph": [
+        {
+            "@type": "MusicGroup",
+            "name": "{{ singer.name|escapejs }}",
+            {% if singer.pic|slice:':4' == 'http' %}"image": "{{ singer.pic|escapejs }}",{% endif %}
+            "url": "{{ SITE_BASE }}{{ request.path }}"
+        },
+        {
+            "@type": "BreadcrumbList",
+            "itemListElement": [
+                {"@type": "ListItem", "position": 1, "name": "首页", "item": "{{ SITE_BASE }}/"},
+                {"@type": "ListItem", "position": 2, "name": "歌手", "item": "{{ SITE_BASE }}/singerlist/index/index/index/index.html"},
+                {"@type": "ListItem", "position": 3, "name": "{{ singer.name|escapejs }}", "item": "{{ SITE_BASE }}{{ request.path }}"}
+            ]
+        }
+    ]
+}
+</script>
+{% endif %}
+{% endblock %}
 
 {% block content %}
 <div class="mx-auto w-full max-w-6xl px-4">

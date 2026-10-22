@@ -6,7 +6,7 @@
 {% block og_title %}{{ keyword }}搜索 - {{ keyword }}歌曲免费在线听 - {{ SITE_NAME_ALT }}{% endblock %}
 {% block og_description %}{{ SITE_BRAND }}搜索{{ keyword }}相关歌曲结果,提供{{ keyword }}歌曲免费在线听完整歌曲,免登录即可在线播放,支持歌词同步滚动。{% endblock %}
 {# 没有结果的搜索页是典型的薄内容页，被收录只会稀释站点质量 #}
-{% block robots %}{% if results %}index, follow{% else %}noindex, follow{% endif %}{% endblock %}
+{% block robots %}{% if results %}index, follow, max-image-preview:large{% else %}noindex, follow{% endif %}{% endblock %}
 
 {% block content %}
 <div class="mx-auto w-full max-w-6xl px-4">

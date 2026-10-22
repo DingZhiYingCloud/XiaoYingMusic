@@ -6,7 +6,7 @@
 {% block og_type %}profile{% endblock %}
 {% block og_title %}{{ title }} - 免费音乐在线试听 - {{ SITE_NAME_ALT }}{% endblock %}
 {% block og_description %}{{ SITE_BRAND }}{{ title }},收录华语、欧美、日韩等各地区歌手,全部歌曲免登录免费在线听。{% endblock %}
-{% block robots %}{% if singers %}index, follow{% else %}noindex, follow{% endif %}{% endblock %}
+{% block robots %}{% if singers %}index, follow, max-image-preview:large{% else %}noindex, follow{% endif %}{% endblock %}
 
 {% block content %}
 <div class="mx-auto w-full max-w-6xl px-4">

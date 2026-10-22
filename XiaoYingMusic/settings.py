@@ -170,6 +170,11 @@ SITE_NAME = os.getenv('SITE_NAME', '杯子音乐网')
 SITE_NAME_ALT = os.getenv('SITE_NAME_ALT', '爱听音乐网')
 # SEO 描述里的品牌组合短语：优先取 .env 的 SITE_BRAND，未配置时自动按「副名（主名）」拼接
 SITE_BRAND = os.getenv('SITE_BRAND') or (f'{SITE_NAME_ALT}（{SITE_NAME}）' if SITE_NAME_ALT else SITE_NAME)
+# 站点规范域名（canonical base），形如 https://www.example.com，结尾不要带斜杠。
+# 为什么需要：本站 www 与裸域指向同一套内容，不指定的话两者会各自自证 canonical，
+# 搜索引擎把同一批页面当成两个站点（重复内容、权重分散）。
+# 留空 = 沿用访客实际访问的域名（行为与从前一致，本地开发也不需要配）。
+SITE_URL = (os.getenv('SITE_URL') or '').rstrip('/')
 # 页脚免责声明的联系邮箱
 SITE_CONTACT_EMAIL = os.getenv('SITE_CONTACT_EMAIL', '3766849790#qq.com')
 # 联系方式（README/文档引用）

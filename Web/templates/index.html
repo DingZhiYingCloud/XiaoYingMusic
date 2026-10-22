@@ -8,7 +8,7 @@
 "抓取源全空就别收录"的闸门因此失去了意义（源站挂了首页照样有内容）。
 改判本地库：歌手名册与曲目库都空，说明库还没建好（或刚清过表），这才是真正的空壳。
 {% endcomment %}
-{% block robots %}{% if hot_singers or random_songs %}index, follow{% else %}noindex, follow{% endif %}{% endblock %}
+{% block robots %}{% if hot_singers or random_songs %}index, follow, max-image-preview:large{% else %}noindex, follow{% endif %}{% endblock %}
 
 {% block content %}
 <div class="mx-auto w-full max-w-6xl px-4">

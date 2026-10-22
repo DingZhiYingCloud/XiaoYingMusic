@@ -5,7 +5,7 @@
 {% block description %}{{ SITE_BRAND }}{{ title }},提供最新{{ title }}歌曲排行榜,网络热门歌曲,新歌速递,流行音乐排行,免登录免费在线听完整歌曲,支持歌词同步滚动。{% endblock %}
 {% block og_title %}{{ title }} - 免费音乐排行榜 - {{ SITE_NAME_ALT }}{% endblock %}
 {% block og_description %}{{ SITE_BRAND }}{{ title }},提供最新歌曲排行榜、网络热门歌曲与流行音乐排行,免登录免费在线听完整歌曲。{% endblock %}
-{% block robots %}{% if songs %}index, follow{% else %}noindex, follow{% endif %}{% endblock %}
+{% block robots %}{% if songs %}index, follow, max-image-preview:large{% else %}noindex, follow{% endif %}{% endblock %}
 
 {% block content %}
 <div class="mx-auto w-full max-w-6xl px-4">

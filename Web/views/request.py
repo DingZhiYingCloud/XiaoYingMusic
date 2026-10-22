@@ -5,6 +5,7 @@ import zipfile
 from urllib.parse import quote
 
 from django.shortcuts import redirect, render
+from django.conf import settings
 from django.http import (HttpResponse, HttpResponseBadRequest, JsonResponse,
                          StreamingHttpResponse)
 from django.core.cache import cache
@@ -18,6 +19,7 @@ import requests
 
 from SpiderServices.Music_2t58.main import Music2t58Spider
 
+from Web.models import PlayedSong, Song, SingerSong
 from Web.services import (favorites, music_library, play_rank, played_songs,
                           singer_library, user_session)
 
@@ -111,11 +113,39 @@ def singer(request, sid, page=1):
     return render(request, 'singer.html', data)
 
 
+def _local_song_meta(sid):
+    """从本地库补出 (歌名, 歌手列表)：搜索库 → 歌手曲目库
+
+    只用于"源站这次没抓到、但本地知道这首歌是谁"的兜底（见 song() 的说明）。
+    两处都存着歌名：Song 是被搜索过的歌，SingerSong 是歌手页曲目（标题格式「歌手 - 歌名」）。
+    取不到返回 ('', [])，不影响正常路径。
+    """
+    row = Song.objects.filter(sid=sid).only('name', 'singers').first()
+    if row and row.name:
+        return row.name, [s for s in (row.singers or '').split('&') if s]
+    title = (SingerSong.objects.filter(sid=sid)
+             .values_list('title', flat=True).first() or '').strip()
+    if not title:
+        return '', []
+    # 歌名本身可能含 " - "，所以只切第一处（与爬虫 _parse_song_title 口径一致）
+    if ' - ' in title:
+        artist_str, name = title.split(' - ', 1)
+        return name.strip(), [a.strip() for a in artist_str.split('&') if a.strip()]
+    return title, []
+
+
 def song(request, sid):
     # 歌曲详情页：sid 为歌曲id（路径参数）
     # 数据优先读本地 PlayedSong 表（见 Web/services/played_songs.py）：只有"这首还没缓存过"
     # 或"直链过了新鲜期"才会回源，避免每打开一个播放页就往源站抓一次。
     data = played_songs.get_for_page(sid)
+    # 源站这次没抓到（歌名都没有）时，用本地库补一个歌名/歌手：
+    # 页面有没有歌名直接决定 robots（见 song.html），补上才不会让一首**本来正常收录**的歌
+    # 因为源站抖了一下就被打上 noindex（2026-10-17 那批"被 noindex 排除"就是这么来的）。
+    if not (data.get('song') or {}).get('name'):
+        name, artists = _local_song_meta(sid)
+        if name:
+            data['song'] = {'name': name, 'artists': artists, 'cover': '', 'singer_url': ''}
     data['sid'] = sid  # 供模板下载弹窗拼接下载地址
     user = user_session.current_user(request)   # 下面两处都要用，只取一次（省一次查询）
     # 心形按钮的初始状态。未登录时 liked_sids 直接返回空集合，不必在这里判登录
@@ -510,23 +540,28 @@ def error_500(request, exception=None):
 #   榜单页        抓得到歌才列          （模板判的是 songs，见 new_songs.html）
 #   歌手大全分页  本地名册非空才列      （模板判的是 singers，见 singer_list.html）
 #   歌手详情页    只列本地名册里的那 24 位（模板判的是 singer.name）
-#   歌曲详情页    只能从源站榜单现取，抓不到就整体跳过（那时页面是空壳，本身也是 noindex）
+#   歌曲详情页    列播放缓存里**有歌名**的那些（模板判的也是 song.name，同源本地库）
 #
 # lastmod 只写**有可信来源**的页面，宁缺勿假 —— Google 对不准的 lastmod 会直接打折扣：
 #   歌手详情页    该歌手曲目的同步时间（songs_synced_at，没同步过就用名册的 pulled_at）
 #   歌手大全分页  该页那 96 位里最近一次同步的时间（见 singer_library.roster_updates）
 #   首页          今天最近一次"整首听完"的时间（今日热听榜就是这一刻变的）
-#   榜单页/歌曲页 内容来自源站实时抓取，本地没有可信时间戳，干脆不写
+#   歌曲详情页    该歌资料写入播放缓存的时间（info_at）
+#   榜单页        内容来自源站实时抓取，本地没有可信时间戳，干脆不写
 #
-# 生成的**路径**列表缓存 6 小时，绝对地址（<loc>）在每次响应时按当前请求的域名拼，
-# 所以换域名不会留下旧域名的死链。原理见 README 第十五章。
+# 生成的**路径**列表缓存 6 小时；绝对地址（<loc>）在每次响应时按**规范域名**拼
+# （settings.SITE_URL，未配置则用当前请求的域名），所以换域名不会留下旧域名的死链。
+# 原理见 README 第十五章。
 SITEMAP_CHARTS = [
     ('/list/new.html', 'new'),
     ('/list/top.html', 'top'),
     ('/list/djwuqu.html', 'djwuqu'),
 ]
-SITEMAP_CACHE_KEY = 'sitemap_urls_v2'
+SITEMAP_CACHE_KEY = 'sitemap_urls_v3'
 SITEMAP_CACHE_TTL = 60 * 60 * 6  # 6 小时
+# sitemap 里最多放多少首歌曲页。播放缓存是按"有人打开过播放页"积累的（可能几万行），
+# 全量塞进去会把抓取预算摊薄；取最近播放的 5000 首，既有代表性又不会失控。
+SITEMAP_SONG_LIMIT = 5000
 # 键名带版本号是刻意的：缓存值是这个列表本身，一旦列表元素的含义/长度变了（比如
 # 这里从 3 元组变成带 lastmod 的 4 元组），服务器上还没过期的旧缓存会在解包时抛异常，
 # 让 /sitemap.xml 500 到缓存过期为止。改结构时顺手把版本号加一最省事。
@@ -580,6 +615,15 @@ def _build_sitemap_urls():
     for song in (data.get('rising_songs') or []) + (data.get('trending_songs') or []):
         add(song.get('link'), 'weekly', '0.6')
 
+    # 歌曲详情页：只列**本地有歌名**的（没有歌名 = 空壳页，模板会打 noindex，
+    # 放进 sitemap 等于给搜索引擎递一堆不该收录的地址）。
+    # 来源是播放缓存 PlayedSong —— 每一行都是真的被人打开过的歌，内容质量有保证。
+    rows = (PlayedSong.objects.exclude(name='')
+            .order_by('-last_played_at', '-id')
+            .values_list('sid', 'info_at')[:SITEMAP_SONG_LIMIT])
+    for sid, info_at in rows:
+        add(f'/song/{sid}.html', 'weekly', '0.7', info_at)
+
     return urls
 
 
@@ -595,8 +639,10 @@ def sitemap(request):
         cache.set(SITEMAP_CACHE_KEY, urls, SITEMAP_CACHE_TTL)
     lines = ['<?xml version="1.0" encoding="UTF-8"?>',
              '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    # 绝对地址统一用规范域名拼（www 与裸域只出现一份；换域名只改 .env 的 SITE_URL）
+    base = settings.SITE_URL or f'{request.scheme}://{request.get_host()}'
     for path, freq, prio, lastmod in urls:
-        loc = request.build_absolute_uri(path)
+        loc = f'{base}{path}'
         # lastmod 用 W3C Datetime（秒级 + 时区偏移，形如 2026-09-24T19:16:07+08:00）。
         # 刻意不带微秒：那不属于 W3C Datetime 的标准写法，个别解析器会判为无效；
         # 也不省略时区，否则搜索引擎会按 UTC 理解。

@@ -12,14 +12,18 @@
     <title>{% block title %}免费音乐在线试听 - 在线听歌免登录 - {{ SITE_NAME_ALT }}|{{ SITE_NAME }}{% endblock %}</title>
     <meta name="keywords" content="{% block keywords %}{{ SITE_NAME }},{{ SITE_NAME_ALT }},免费音乐,免费音乐网,在线听音乐,免费听歌,在线听歌,音乐在线播放,在线听歌网站,免登录听歌,无需注册听歌,不用下载软件的音乐网站,免费音乐在线听,完整版试听,歌词同步,DJ舞曲,经典老歌{% endblock %}" />
     <meta name="description" content="{% block description %}{{ SITE_BRAND }}免费音乐在线试听网站,无需下载音乐软件、无需注册登录、无需付费,打开网页即可在线听完整歌曲。提供DJ舞曲、经典老歌、英文歌曲等海量免费音乐,支持歌词同步滚动。{% endblock %}" />
-    <!-- 搜索引擎爬虫：默认允许收录；数据为空（抓取失败）的页面可覆盖为 noindex, follow，避免收录薄内容页 -->
-    <meta name="robots" content="{% block robots %}index, follow{% endblock %}" />
+    <!-- 搜索引擎爬虫：默认允许收录；数据为空（抓取失败）的页面可覆盖为 noindex, follow，避免收录薄内容页。
+         max-image-preview:large 让搜索结果带大图（音乐站封面是主要点击诱因），
+         不加的话 Google 只给缩略图。 -->
+    <meta name="robots" content="{% block robots %}index, follow, max-image-preview:large{% endblock %}" />
     <!-- 规范链接：声明当前页面唯一权威地址，避免重复内容（分页/参数等）被拆分收录 -->
     {% comment %}
-    canonical 用 path 而不是 build_absolute_uri：后者会把 ?utm_source=xxx 之类的查询串一起带上，
-    同一篇文章就会因参数不同被搜索引擎当成多个不同地址。
+    canonical 用 SITE_BASE + path，而不是 build_absolute_uri：
+      ① 后者会把 ?utm_source=xxx 之类的查询串一起带上，同一页会因参数不同被当成多个地址；
+      ② SITE_BASE 是 .env 里配置的规范域名，www 与裸域访问同一页时 canonical 只有一个，
+         不会各证各的（重复内容、权重分散）。
     {% endcomment %}
-    <link rel="canonical" href="{% block canonical %}{{ request.scheme }}://{{ request.get_host }}{{ request.path }}{% endblock %}" />
+    <link rel="canonical" href="{% block canonical %}{{ SITE_BASE }}{{ request.path }}{% endblock %}" />
     <!-- 移动端浏览器地址栏颜色：这里是 JS 未执行时的静态兜底值（emerald 主色）。
          JS 运行后会跟着主题一起变，见 static/js/theme.js 的 updateThemeColor()。 -->
     <meta name="theme-color" content="#66cc8a" />
@@ -30,8 +34,8 @@
     <meta property="og:type" content="{% block og_type %}website{% endblock %}" />
     <meta property="og:title" content="{% block og_title %}免费音乐在线试听 - 在线听歌免登录 - {{ SITE_NAME_ALT }}|{{ SITE_NAME }}{% endblock %}" />
     <meta property="og:description" content="{% block og_description %}{{ SITE_BRAND }}免费音乐在线试听网站,无需下载音乐软件、无需注册登录、无需付费,打开网页即可在线听完整歌曲,支持歌词同步滚动。{% endblock %}" />
-    <meta property="og:url" content="{% block og_url %}{{ request.scheme }}://{{ request.get_host }}{{ request.path }}{% endblock %}" />
-    <meta property="og:image" content="{% block og_image %}{{ request.scheme }}://{{ request.get_host }}/static/images/logo.png{% endblock %}" />
+    <meta property="og:url" content="{% block og_url %}{{ SITE_BASE }}{{ request.path }}{% endblock %}" />
+    <meta property="og:image" content="{% block og_image %}{{ SITE_BASE }}/static/images/logo.png{% endblock %}" />
     <meta property="og:locale" content="zh_CN" />
     <!-- Twitter Card：只保留 card 类型，标题/描述/图直接用上面的 og:*。
          X（Twitter）在缺 twitter:* 时会回落到 og:*，两套并存只会多出
@@ -43,11 +47,11 @@
         "@context": "https://schema.org",
         "@type": "WebSite",
         "name": "{{ SITE_NAME }}",
-        "url": "{{ request.scheme }}://{{ request.get_host }}/",
+        "url": "{{ SITE_BASE }}/",
         "description": "免费音乐在线试听网站，提供DJ舞曲、经典老歌、网络热门歌曲等海量免费音乐，支持歌词同步滚动。",
         "potentialAction": {
             "@type": "SearchAction",
-            "target": "{{ request.scheme }}://{{ request.get_host }}/so/{search_term_string}.html",
+            "target": "{{ SITE_BASE }}/so/{search_term_string}.html",
             "query-input": "required name=search_term_string"
         }
     }
@@ -111,6 +115,8 @@
         })();
     </script>
     <link rel="stylesheet" href="/static/css/output.css?v={{ STATIC_VERSION }}" />
+    {# 图标字体走公共 CDN：提前握手，别等 CSS 解析到 @font-face 才去连（移动端首屏能省几百毫秒） #}
+    <link rel="preconnect" href="https://cdn.bootcdn.net" crossorigin>
     <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
     {% comment %}
     CSRF token：项目已启用 CsrfViewMiddleware（见 settings.py），页面里的异步 POST

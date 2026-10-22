@@ -1,16 +1,48 @@
 {% extends 'template.html' %}
 
-{% block title %}{{ song.artists|join:'/' }} - {{ song.name }}免费在线听完整版 - {{ SITE_NAME_ALT }}{% endblock %}
+{% block title %}{% if song.artists %}{{ song.artists|join:'/' }} - {% endif %}{{ song.name }}免费在线听完整版 - {{ SITE_NAME_ALT }}{% endblock %}
 {% block keywords %}{{ song.name }},{{ song.name }}免费在线听,{{ song.name }}在线听完整歌曲,{{ song.name }}歌词,{{ song.artists|join:',' }},免费音乐,在线听歌,免费听歌,音乐在线播放,免登录听歌,{{ SITE_NAME_ALT }},{{ SITE_NAME }}{% endblock %}
-{% block description %}{{ SITE_BRAND }}提供{{ song.artists|join:'/' }}演唱的{{ song.name }}免费在线听完整歌曲,无需下载音乐软件、免登录即可在线播放,支持{{ song.name }}歌词同步滚动,还有{{ song.artists|join:'/' }}更多好听的歌免费在线听。{% endblock %}
+{% block description %}{{ SITE_BRAND }}提供{% if song.artists %}{{ song.artists|join:'/' }}演唱的{% endif %}{{ song.name }}免费在线听完整歌曲,无需下载音乐软件、免登录即可在线播放,支持{{ song.name }}歌词同步滚动,还有{% if song.artists %}{{ song.artists|join:'/' }}{% endif %}更多好听的歌免费在线听。{% endblock %}
 {# 社交分享卡片：og_* 必须按页覆写，不覆写的话分享任何一首歌都只会显示首页文案（见 template.html 的说明） #}
 {% block og_type %}music.song{% endblock %}
-{% block og_title %}{{ song.artists|join:'/' }} - {{ song.name }}免费在线听完整版 - {{ SITE_NAME_ALT }}{% endblock %}
-{% block og_description %}{{ SITE_BRAND }}提供{{ song.artists|join:'/' }}演唱的{{ song.name }}免费在线听完整歌曲,免登录即可在线播放,支持歌词同步滚动。{% endblock %}
+{% block og_title %}{% if song.artists %}{{ song.artists|join:'/' }} - {% endif %}{{ song.name }}免费在线听完整版 - {{ SITE_NAME_ALT }}{% endblock %}
+{% block og_description %}{{ SITE_BRAND }}提供{% if song.artists %}{{ song.artists|join:'/' }}演唱的{% endif %}{{ song.name }}免费在线听完整歌曲,免登录即可在线播放,支持歌词同步滚动。{% endblock %}
 {# 封面图只在确认是绝对地址时才用，否则回落到默认图 —— 相对路径的 og:image 是无效的 #}
 {% block og_image %}{% if song.cover|slice:':4' == 'http' %}{{ song.cover }}{% else %}{{ block.super }}{% endif %}{% endblock %}
-{# 抓取失败时页面是个空壳，别让搜索引擎收录 #}
-{% block robots %}{% if song.name %}index, follow{% else %}noindex, follow{% endif %}{% endblock %}
+{# 抓取失败时页面是个空壳，别让搜索引擎收录；有歌名（含本地库补出来的）就正常收录 #}
+{% block robots %}{% if song.name %}index, follow, max-image-preview:large{% else %}noindex, follow{% endif %}{% endblock %}
+
+{% block head %}
+{% comment %}
+结构化数据（schema.org）：告诉搜索引擎"这是一首歌、谁唱的、封面是什么"，并给出面包屑。
+只输出有歌名的情况（空壳页没意义）。audio 刻意不写 —— 播放直链带 token 会过期，
+把过期地址写进结构化数据等于给搜索引擎一个死链。
+{% endcomment %}
+{% if song.name %}
+<script type="application/ld+json">
+{
+    "@context": "https://schema.org",
+    "@graph": [
+        {
+            "@type": "MusicRecording",
+            "name": "{{ song.name|escapejs }}",
+            {% if song.artists %}"byArtist": {"@type": "MusicGroup", "name": "{{ song.artists|join:'/'|escapejs }}"},{% endif %}
+            {% if song.cover|slice:':4' == 'http' %}"image": "{{ song.cover|escapejs }}",{% endif %}
+            "url": "{{ SITE_BASE }}{{ request.path }}",
+            "inLanguage": "zh-CN"
+        },
+        {
+            "@type": "BreadcrumbList",
+            "itemListElement": [
+                {"@type": "ListItem", "position": 1, "name": "首页", "item": "{{ SITE_BASE }}/"},
+                {"@type": "ListItem", "position": 2, "name": "{{ song.name|escapejs }}", "item": "{{ SITE_BASE }}{{ request.path }}"}
+            ]
+        }
+    ]
+}
+</script>
+{% endif %}
+{% endblock %}
 
 {% block content %}
 <div class="mx-auto w-full max-w-6xl px-4">
@@ -258,7 +290,7 @@
                         </p>
                         {% if not CURRENT_USER %}
                         <p class="py-6 text-center text-xs opacity-60">
-                            <a href="/login.html?next={{ request.get_full_path|urlencode }}" class="link link-primary">登录</a>
+                            <a href="/login.html?next={{ request.get_full_path|urlencode }}" rel="nofollow" class="link link-primary">登录</a>
                             后可以收藏喜欢的歌。
                         </p>
                         {% endif %}

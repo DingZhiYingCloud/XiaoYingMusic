@@ -2111,9 +2111,9 @@ find /www/backup/music -name 'db-*.sqlite3' -mtime +7 -delete
    清零"时空窗期也短了一半以上。仍然没做的是**指数退避**（连续失败越久、冷却越长）：
    源站整体宕机的场景下它更省，但目前没遇到非做不可的情况。
 
-## 十五、SEO 细节（sitemap / robots.txt / meta robots）
+## 十五、SEO 细节（canonical / sitemap / robots.txt / meta robots / 结构化数据）
 
-这三样是搜索引擎真正会读的东西。下面每条取舍都有实测支撑，改之前先看一眼。
+这几样是搜索引擎真正会读的东西。下面每条取舍都有实测支撑，改之前先看一眼。
 
 ### 15.1 sitemap.xml 只放"当前确实可收录"的页面
 
@@ -2126,11 +2126,15 @@ find /www/backup/music -name 'db-*.sqlite3' -mtime +7 -delete
 | 榜单页 ×3 | 3 | 该榜单此刻抓得到歌 | `songs` |
 | 歌手大全分页 | 245 | 本地名册非空 | `singers` |
 | 歌手详情页 | 24 | 本地名册的**前** 24 位（固定的那批，不是首页随机墙） | `singer.name` |
-| 歌曲详情页 | 106 | 从源站榜单现取，抓不到就整段跳过 | `song.name` |
+| 歌曲详情页 | ≤ 5000 | 播放缓存 `PlayedSong` 里**有歌名**的歌，按最近播放取前 5000 条 | `song.name` |
 
-**实测：379 条 URL 全部返回 200 且是 `index, follow`，一条不合规的都没有。**
-源站全挂时会自动降级成 270 条（只剩本地库页面）—— 而那 3 个榜单页此刻自己也变成了
-`noindex`，两边依然一致（这是刻意对齐的，见 15.5）。
+**实测（本地种子库）：404 条 URL，其中歌曲页 131 条；抽查首页/榜单/歌手/歌曲页全部 200 且是
+`index, follow`。** 线上条数会随播放缓存增长（上限见上表），判定与模板用的是同一份数据源，
+不会出现"sitemap 里有、页面却 noindex"的矛盾。
+
+**为什么歌曲页现在能进 sitemap 了**：以前只能从源站榜单现取（抓不到就整段跳过），因为
+本地没有可信的"这首歌是真实存在的"依据。`PlayedSong` 每行都是真的被打开过的歌、且存着歌名，
+正好补上这个依据 —— 收录条件与页面 robots 完全对齐（都看 `song.name`）。
 
 **为什么歌手页只列 24 位**：两万多位歌手的入口都在歌手大全那 245 个列表页里，
 让爬虫顺着列表页往下走就行。把 2 万多条详情页全塞进 sitemap 只会把它撑到几 MB。
@@ -2147,9 +2151,10 @@ Google 用 `lastmod` 判断"要不要重抓"，但**对不准的 lastmod 会直�
 | 歌手详情页 | 该歌手曲目的同步时间（`songs_synced_at`，没同步过就用名册的 `pulled_at`） |
 | 歌手大全分页 | 该页那 96 位里最近一次同步的时间（`singer_library.roster_updates`） |
 | 首页 | 今天最近一次"整首听完"的时间（今日热听榜就是那一刻变的） |
-| 榜单页 / 歌曲详情页 | **不写** —— 内容来自源站实时抓取，本地没有可信时间戳 |
+| 歌曲详情页 | 该歌资料写入播放缓存的时间（`PlayedSong.info_at`） |
+| 榜单页 | **不写** —— 内容来自源站实时抓取，本地没有可信时间戳 |
 
-实测 270/379 条带 lastmod，格式为 W3C Datetime 的**秒级**写法：
+除 3 个榜单页外，其余条目都带 lastmod，格式为 W3C Datetime 的**秒级**写法：
 
 ```
 <lastmod>2026-09-24T19:16:07+08:00</lastmod>
@@ -2161,30 +2166,52 @@ Google 用 `lastmod` 判断"要不要重抓"，但**对不准的 lastmod 会直�
 `changefreq` / `priority` 保留着，但要知道 **Google 已明确忽略这两项**（Bing 也只当弱信号），
 真正起作用的是 `lastmod` 和页面本身。
 
-### 15.3 缓存与"换域名"
+### 15.3 缓存、规范域名与"换域名"
 
-sitemap 的**路径列表**缓存 6 小时，但 `<loc>` 是每次响应时才用 `request.build_absolute_uri`
-按当前域名拼的 —— 所以换域名后不会残留旧域名的死链（旧写法缓存绝对地址就会）。
+sitemap 的**路径列表**缓存 6 小时，但 `<loc>` 是每次响应时才拼的 —— 所以换域名后不会残留
+旧域名的死链（旧写法缓存绝对地址就会）。
 
-> 缓存键是 `sitemap_urls_v2`，**版本号是刻意的**：缓存里存的就是这个列表本身，
-> 元素结构一变（这里从 3 元组变成带 lastmod 的 4 元组），服务器上还没过期的旧缓存
+**规范域名（`SITE_URL`，2026-10 新增）**：本站 `www` 与裸域指向同一套内容，两边的
+canonical / og:url / sitemap 以前各证各的，搜索引擎会把同一批页面当成两个站点。
+现在统一取 `settings.SITE_URL`（`.env` 的 `SITE_URL=https://www.example.com`）：
+
+| 用在哪 | 值 |
+|---|---|
+| `canonical` / `og:url` / `og:image` / 结构化数据 | `{{ SITE_BASE }}{{ request.path }}` |
+| `sitemap.xml` 的 `<loc>` | `{{ SITE_BASE }}` + 路径 |
+| `robots.txt` 的 `Sitemap:` | `{{ SITE_BASE }}/sitemap.xml` |
+
+留空 = 沿用访客实际访问的协议 + 域名（本地开发不用配）。配了之后，用裸域访问任意页面，
+canonical 仍然指向 www —— 这就是把两个域名收敛成一个的信号。想做更硬的 301 收敛，
+在 Nginx 上加一条 `return 301 https://www.example.com$request_uri;` 即可（本项目没做，
+避免与 Cloudflare 的规则叠加出重定向环）。
+
+> 缓存键是 `sitemap_urls_v3`，**版本号是刻意的**：缓存里存的就是这个列表本身，
+> 元素结构一变（曾经从 3 元组变成带 lastmod 的 4 元组），服务器上还没过期的旧缓存
 > 会在解包时抛异常，让 `/sitemap.xml` 500 到缓存过期为止。
 > 以后改结构记得把版本号加一（`cache/` 不入库，本地清缓存救不了服务器）。
 
 单文件 sitemap 的上限是 5 万条 URL / 50 MB（未压缩），本站几百条，离上限很远；
 真到那天再拆成 sitemap index 即可。
 
-### 15.4 robots.txt：为什么只屏蔽了一个地址
+### 15.4 robots.txt：只屏蔽三类地址
 
 ```
 User-agent: *
 Disallow: /api/
-Sitemap: https://你的域名/sitemap.xml
+Disallow: /login.html
+Disallow: /register.html
+Sitemap: https://你的规范域名/sitemap.xml
 ```
 
-**全站允许抓取**，只屏蔽播放计数接口（它只接受 POST、不是页面；robots.txt 只约束爬虫，
-浏览器里的 `fetch` 照常上报，播放计数不受影响）。三个"故意不屏蔽"的路径，理由写在
-`Web/templates/robots.txt` 的注释里，改之前务必读一遍：
+**页面全站允许抓取**，只屏蔽三类：播放计数接口（只接受 POST、不是页面）、登录页、注册页。
+robots.txt 只约束爬虫，浏览器里的 `fetch` 与用户点击都不受影响。
+
+登录/注册为什么要 Disallow（2026-10 加）：这两个页面永久 `noindex`、没有任何搜索价值，
+但播放页的「登录」入口会带出 `?next=/song/xxx.html` 的大量变体地址 —— Google 站长后台
+会攒出一堆「被 noindex 排除」，还白占抓取预算。链接本身也加了 `rel="nofollow"`，双保险。
+
+以下是"故意不屏蔽"的路径，理由写在 `Web/templates/robots.txt` 的注释里，改之前务必读一遍：
 
 | 路径 | 为什么不屏蔽 |
 |---|---|
@@ -2192,7 +2219,7 @@ Sitemap: https://你的域名/sitemap.xml
 | `/download/<sid>/…` | 下载已关闭、现在一律 404。**保持 404 才能让搜索引擎把已经收录的下载页清掉**；Disallow 会让爬虫看不到 404，那些页面就一直在索引里挂着 |
 | `/static/`、`/media/` | 必须让爬虫抓到 CSS/JS/图片，否则它对页面的渲染判断会出错 |
 
-`Sitemap:` 用的是当前请求的域名（模板动态拼），换域名不用改这一行。
+`Sitemap:` 用的是**规范域名**（`SITE_BASE`，与 canonical 同源），不再跟随当前请求的域名。
 
 ### 15.5 meta robots：各页面的实际规则
 
@@ -2202,11 +2229,33 @@ Sitemap: https://你的域名/sitemap.xml
 | 歌手大全 | `singers` | 同上 |
 | 歌手详情页 | `singer.name` | 库里查不到这位歌手 |
 | 榜单页 | `songs` | 源站抓不到数据（此时 sitemap 也会把它剔除） |
-| 歌曲详情页 | `song.name` | 源站抓不到这首歌 |
+| 歌曲详情页 | `song.name` | 源站抓不到**且**本地库也没有歌名 |
 | 搜索页 | `results` | 这个关键词没有结果（典型薄内容页） |
 | 404 / 500 | 恒 `noindex, follow` | — |
 
-### 15.6 上线后自己验一遍
+**可收录页一律带 `max-image-preview:large`**（2026-10 加）：不加它，Google 搜索结果里
+只给封面缩略图；音乐站封面是主要点击诱因，值得放开大图预览。
+
+**歌曲页 2026-10 的修复（对应 GSC「被 noindex 排除」里那批 `/song/` 地址）**：
+原来源站抖一下、`played_songs.get_for_page` 抓不到歌名，页面就成了空壳并输出 `noindex`，
+一首本来正常收录的歌因此被踢出索引。现在 `song()` 会先用**本地库**补歌名：
+`Song`（被搜索过的歌）→ `SingerSong`（歌手页曲目，标题「歌手 - 歌名」），补到就照常
+`index, follow`；只有两边都没有（多半是乱造的 sid）才是 noindex。见 `_local_song_meta`。
+
+### 15.6 结构化数据（schema.org JSON-LD）
+
+| 页面 | 类型 | 写在哪个模板 |
+|---|---|---|
+| 全站 | `WebSite` + `SearchAction`（站内搜索框） | `template.html` |
+| 歌曲详情页 | `MusicRecording`（歌名 / 歌手 / 封面 / 语言）+ `BreadcrumbList` | `song.html` 的 `block head` |
+| 歌手详情页 | `MusicGroup`（姓名 / 头像）+ `BreadcrumbList` | `singer.html` 的 `block head` |
+
+只输出**有内容**的页面（空壳页不输出，和 robots 判定同源）。两个刻意的细节：
+① 歌曲的 `audio` 字段**不写** —— 播放直链带 token 会过期，写进结构化数据等于给搜索引擎
+一个死链；② 图片只在确认是绝对地址时才写（相对路径在结构化数据里无效）。
+JSON 一律走 Django 的 `escapejs`，含引号/换行的歌名也不会把 JSON 弄坏。
+
+### 15.7 上线后自己验一遍
 
 ```bash
 # 1) 两个地址都能开、类型正确

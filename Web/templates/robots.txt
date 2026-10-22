@@ -7,6 +7,12 @@ User-agent: *
 # （robots.txt 只约束爬虫，浏览器里的 fetch 不受影响，播放计数照常上报。）
 Disallow: /api/
 
+# 登录 / 注册：永久 noindex、没有任何搜索价值，却会被 "喜欢" 按钮带出
+# /login.html?next=/song/xxx.html 这样的大量变体地址（Google 站长后台会看到一堆
+# 「被 noindex 排除」，还白占抓取预算）。这两个页面本来就是给用户点的，拦爬虫不影响使用。
+Disallow: /login.html
+Disallow: /register.html
+
 # ============ 以下几个路径是**故意不屏蔽**的，改之前先读完这段 ============
 #
 # /so/<关键词>.html（搜索页）
@@ -21,5 +27,6 @@ Disallow: /api/
 # 未收录但未被屏蔽的还有：带参数的列表地址（会 301 收敛）、/singer/<sid>/<页码>.html
 # 这类不在 sitemap 里的深分页 —— 让爬虫自己顺着链接走就行，不必在这里逐一列举。
 
-# 站点地图：绝对地址，模板里按当前请求的域名动态拼（换域名不用改这里）
-Sitemap: {{ request.scheme }}://{{ request.get_host }}/sitemap.xml
+# 站点地图：绝对地址用**规范域名**（settings.SITE_URL，与 canonical 同源），
+# 避免 www / 裸域各生成一份、让搜索引擎当成两套站点。
+Sitemap: {{ SITE_BASE }}/sitemap.xml

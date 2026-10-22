@@ -7,6 +7,7 @@
     {{ SITE_NAME }}           站点主名称（如 杯子音乐网）
     {{ SITE_NAME_ALT }}       站点副名称（如 爱听音乐网，可为空）
     {{ SITE_BRAND }}          SEO 文案用的品牌组合短语（如 爱听音乐网（杯子音乐网））
+    {{ SITE_BASE }}           站点规范地址（canonical 前缀，如 https://www.example.com，无结尾斜杠）
     {{ SITE_CONTACT_EMAIL }}  联系邮箱
     {{ SITE_CONTACT_WECHAT }} 微信号
     {{ SITE_CONTACT_TG }}     Telegram
@@ -55,10 +56,14 @@ def site_info(request):
     # 用 localdate() 而非 date.today()：时区取 settings.TIME_ZONE（Asia/Shanghai），
     # 避免服务器跑在 UTC 时「节假日提前 8 小时开始」。
     day = holiday.resolve(timezone.localdate(), request.GET.get('bz_preview', ''))
+    # 规范地址：配了 SITE_URL 就全站统一用它（www 与裸域收敛成一个站点，见 settings.py）；
+    # 没配则按本次访问的协议 + 域名自证，本地开发/换域名都不必改代码。
+    base = settings.SITE_URL or f'{request.scheme}://{request.get_host()}'
     return {
         'SITE_NAME': settings.SITE_NAME,
         'SITE_NAME_ALT': settings.SITE_NAME_ALT,
         'SITE_BRAND': settings.SITE_BRAND,
+        'SITE_BASE': base,
         'SITE_CONTACT_EMAIL': settings.SITE_CONTACT_EMAIL,
         'SITE_CONTACT_WECHAT': settings.SITE_CONTACT_WECHAT,
         'SITE_CONTACT_TG': settings.SITE_CONTACT_TG,
